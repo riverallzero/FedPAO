@@ -113,6 +113,20 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_fedpao_dryrun.py \
   --eval-every-round
 ```
 
+Run latent baselines:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_latent_baselines.py \
+  --config configs/fedpao_smoke_taskonly.yaml \
+  --clients-per-round 6 \
+  --max-train-samples-per-client 4 \
+  --max-eval-samples-per-client 4 \
+  --population-size 4 \
+  --local-iterations 2 \
+  --max-new-tokens 8 \
+  --include-local-cma
+```
+
 List local causal model candidates:
 
 ```bash

@@ -558,6 +558,29 @@ task-only exact-match objective에서는 모든 후보가 동률이면 initial l
 따라서 이 smoke에서 global_z_norm=0.0인 것은 성능 개선 실패가 아니라 baseline retention 동작 확인으로 해석한다.
 ```
 
+Baseline smoke:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_latent_baselines.py \
+  --config configs/fedpao_smoke_taskonly.yaml \
+  --clients-per-round 2 \
+  --max-train-samples-per-client 1 \
+  --max-eval-samples-per-client 1 \
+  --population-size 2 \
+  --local-iterations 1 \
+  --max-new-tokens 2 \
+  --include-local-cma \
+  --output-dir outputs/latent_baselines_smoke
+```
+
+결과:
+
+```text
+baseline_metrics rows: 8
+baselines: no_soft_prompt, zero_latent, random_latent, local_only_cma
+local_only_cma num_evaluations: 3
+```
+
 ## 12. 학습을 해야 하는가?
 
 지금 단계에서 LLM 자체 fine-tuning은 하지 않는 것이 맞다.
@@ -593,13 +616,12 @@ aggregation: FedAvg-style aggregation over client prompt latents
 1. Broaden dry run sample size and iterations
 2. Add focused tests for FedAvg, split loading, and CMA wrapper
 3. Add MLflow/W&B offline logging hooks
-4. Add baseline runners: zero latent, random latent, no soft prompt, local-only CMA
-5. Add dense scoring for MMLU option log-likelihood
-6. GPTSwarm wrapper
-7. MASRouter wrapper
-8. Puppeteer wrapper
-9. cost / latency / redundant call metric refinement
-10. full FedPAO experiment
+4. Add dense scoring for MMLU option log-likelihood
+5. GPTSwarm wrapper
+6. MASRouter wrapper
+7. Puppeteer wrapper
+8. cost / latency / redundant call metric refinement
+9. full FedPAO experiment
 ```
 
 ## 14. Known Caveats
