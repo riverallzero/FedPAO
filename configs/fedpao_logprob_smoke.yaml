@@ -1,0 +1,109 @@
+seed: 42
+
+data:
+  split_dir: data/processed/splits
+
+datasets:
+  mmlu_pro:
+    source_split: validation
+    train_ratio: 0.7
+    eval_ratio: 0.3
+    test_split: test
+  gsm_hard:
+    source_split: train
+    train_ratio: 0.7
+    eval_ratio: 0.15
+    test_ratio: 0.15
+
+model:
+  backend: hf_causal
+  model_id: /data/digirl/checkpoints/Qwen3.5-2B-Base
+  smoke_model_id: /data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
+  device: cuda
+  dtype: auto
+
+prompt:
+  type: soft_latent
+  latent_dim: 32
+  prompt_length: 8
+  projection_seed: 42
+  init_std: 0.02
+
+optimizer:
+  name: cma_es
+  sigma0: 0.5
+  population_size: 4
+  local_iterations: 2
+  local_batch_size: 4
+
+federated:
+  rounds: 2
+  clients_per_round: 6
+  aggregation: fedavg
+  weight_by: num_examples
+
+objective:
+  # MMLU-Pro uses option log-likelihood; GSM-Hard uses answer string log-likelihood.
+  score_mode: hybrid_logprob
+  task_loss_weight: 1.0
+  call_cost_weight: 0.0
+  token_cost_weight: 0.0
+  latency_weight: 0.0
+  redundant_call_weight: 0.0
+  invalid_action_weight: 0.0
+
+orchestrators:
+  default: mock
+  adapters:
+    gptswarm:
+      third_party_path: third_party/GPTSwarm
+    masrouter:
+      third_party_path: third_party/masrouter
+    puppeteer:
+      third_party_path: third_party/ChatDev-puppeteer
+
+evaluation:
+  metrics:
+    - accuracy
+    - exact_match
+    - task_loss
+    - avg_agent_calls
+    - avg_tool_calls
+    - avg_tokens
+    - avg_latency
+    - redundant_call_rate
+    - invalid_action_rate
+    - client_upload_bytes
+    - server_download_bytes
+    - total_round_bytes
+
+clients:
+  - id: c1
+    mas: puppeteer
+    dataset: mmlu_pro
+    dataset_name: TIGER-Lab/MMLU-Pro
+
+  - id: c2
+    mas: puppeteer
+    dataset: gsm_hard
+    dataset_name: reasoning-machines/gsm-hard
+
+  - id: c3
+    mas: masrouter
+    dataset: mmlu_pro
+    dataset_name: TIGER-Lab/MMLU-Pro
+
+  - id: c4
+    mas: masrouter
+    dataset: gsm_hard
+    dataset_name: reasoning-machines/gsm-hard
+
+  - id: c5
+    mas: gptswarm
+    dataset: mmlu_pro
+    dataset_name: TIGER-Lab/MMLU-Pro
+
+  - id: c6
+    mas: gptswarm
+    dataset: gsm_hard
+    dataset_name: reasoning-machines/gsm-hard

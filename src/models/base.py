@@ -15,6 +15,15 @@ class GenerationResult:
     latency_sec: float
 
 
+@dataclass(frozen=True)
+class ScoringResult:
+    scores: dict[str, float]
+    prompt_tokens: int
+    continuation_tokens: int
+    total_tokens: int
+    latency_sec: float
+
+
 class LLMBackend(Protocol):
     def generate(self, prompt: str, max_new_tokens: int) -> GenerationResult:
         ...
@@ -27,3 +36,10 @@ class LLMBackend(Protocol):
     ) -> GenerationResult:
         ...
 
+    def score_continuations(
+        self,
+        prompt: str,
+        continuations: dict[str, str],
+        soft_prompt_embeds: torch.Tensor | None = None,
+    ) -> ScoringResult:
+        ...

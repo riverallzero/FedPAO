@@ -43,12 +43,23 @@ federated:
   weight_by: num_examples
 
 objective:
+  score_mode: exact_match
   task_loss_weight: 1.0
   call_cost_weight: 0.0
   token_cost_weight: 0.0
   latency_weight: 0.0
   redundant_call_weight: 0.0
   invalid_action_weight: 0.0
+
+orchestrators:
+  default: mock
+  adapters:
+    gptswarm:
+      third_party_path: third_party/GPTSwarm
+    masrouter:
+      third_party_path: third_party/masrouter
+    puppeteer:
+      third_party_path: third_party/ChatDev-puppeteer
 
 evaluation:
   metrics:

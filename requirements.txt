@@ -32,3 +32,5 @@ openai>=1.0
 mlflow>=2.16
 wandb>=0.18
 
+# Testing
+pytest>=8.0

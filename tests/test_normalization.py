@@ -1,5 +1,6 @@
 from src.evaluation.normalization import (
     normalize_mmlu_answer,
+    numeric_answer_variants,
     normalize_prediction,
 )
 from src.evaluation.metrics import exact_match
@@ -22,7 +23,13 @@ def test_gsm_prediction_normalization():
     assert normalize_prediction("gsm_hard", "1,234") == "1234"
     assert normalize_prediction("gsm_hard", "#### -9867630.0") == "-9867630.0"
     assert normalize_prediction("gsm_hard", "The final answer is 42.") == "42"
+    assert normalize_prediction("gsm_hard", "The final answer is 5.97490e-6") == "5.97490e-6"
     assert exact_match("gsm_hard", "5.97490e-6", "0.0000059749")
+
+
+def test_gsm_answer_variants():
+    assert numeric_answer_variants("5.9749e-06") == ["5.9749e-06", "0.0000059749"]
+    assert numeric_answer_variants("15.0") == ["15.0", "15"]
 
 
 if __name__ == "__main__":

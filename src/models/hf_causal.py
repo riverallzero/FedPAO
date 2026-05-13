@@ -5,7 +5,7 @@ import time
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.models.base import GenerationResult
+from src.models.base import GenerationResult, ScoringResult
 
 
 def resolve_dtype(dtype: str):
@@ -112,3 +112,123 @@ class HFCausalBackend:
             )
         return self._decode_generation(output_ids, prompt_tokens, time.perf_counter() - start)
 
+    def score_continuations(
+        self,
+        prompt: str,
+        continuations: dict[str, str],
+        soft_prompt_embeds: torch.Tensor | None = None,
+    ) -> ScoringResult:
+        if not continuations:
+            raise ValueError("continuations must not be empty")
+
+        prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"][0]
+        continuation_ids = {
+            key: self.tokenizer(value, add_special_tokens=False)["input_ids"]
+            for key, value in continuations.items()
+        }
+        if any(len(ids) == 0 for ids in continuation_ids.values()):
+            raise ValueError("continuations must tokenize to at least one token")
+
+        device = self.device
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+
+        full_sequences = [
+            torch.cat(
+                [
+                    prompt_ids,
+                    torch.tensor(ids, dtype=prompt_ids.dtype),
+                ]
+            )
+            for ids in continuation_ids.values()
+        ]
+        max_length = max(int(sequence.shape[-1]) for sequence in full_sequences)
+        input_ids = torch.full(
+            (len(full_sequences), max_length),
+            int(pad_token_id),
+            dtype=torch.long,
+            device=device,
+        )
+        attention_mask = torch.zeros(
+            (len(full_sequences), max_length),
+            dtype=torch.long,
+            device=device,
+        )
+        for row, sequence in enumerate(full_sequences):
+            sequence = sequence.to(device)
+            input_ids[row, : sequence.shape[-1]] = sequence
+            attention_mask[row, : sequence.shape[-1]] = 1
+
+        token_embeds = self.model.get_input_embeddings()(input_ids)
+        soft_length = 0
+        if soft_prompt_embeds is not None:
+            if soft_prompt_embeds.ndim == 2:
+                soft_prompt_embeds = soft_prompt_embeds.unsqueeze(0)
+            soft_prompt_embeds = soft_prompt_embeds.to(
+                device=token_embeds.device,
+                dtype=token_embeds.dtype,
+            )
+            soft_prompt_embeds = soft_prompt_embeds.expand(token_embeds.shape[0], -1, -1)
+            token_embeds = torch.cat([soft_prompt_embeds, token_embeds], dim=1)
+            soft_length = int(soft_prompt_embeds.shape[1])
+            soft_mask = torch.ones(
+                (attention_mask.shape[0], soft_length),
+                dtype=attention_mask.dtype,
+                device=attention_mask.device,
+            )
+            attention_mask = torch.cat([soft_mask, attention_mask], dim=1)
+
+        start = time.perf_counter()
+        with torch.inference_mode():
+            logits = self.model(
+                inputs_embeds=token_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+            ).logits
+        log_probs = torch.log_softmax(logits, dim=-1)
+
+        prompt_length = int(prompt_ids.shape[-1])
+        scores = {}
+        max_continuation_tokens = 0
+        for row, (key, ids) in enumerate(continuation_ids.items()):
+            max_continuation_tokens = max(max_continuation_tokens, len(ids))
+            score = 0.0
+            for offset, token_id in enumerate(ids):
+                full_token_index = prompt_length + offset
+                logits_index = soft_length + full_token_index - 1
+                score += float(log_probs[row, logits_index, int(token_id)].item())
+            scores[key] = score
+
+        prompt_tokens = prompt_length + soft_length
+        return ScoringResult(
+            scores=scores,
+            prompt_tokens=prompt_tokens,
+            continuation_tokens=max_continuation_tokens,
+            total_tokens=prompt_tokens + max_continuation_tokens,
+            latency_sec=round(time.perf_counter() - start, 4),
+        )
+
+    def score_choices_with_soft_prompt(
+        self,
+        prompt: str,
+        choices: list[str],
+        soft_prompt_embeds: torch.Tensor | None = None,
+    ) -> ScoringResult:
+        return self.score_continuations(
+            prompt,
+            {choice: f" {choice}" for choice in choices},
+            soft_prompt_embeds,
+        )
+
+    def score_answer_with_soft_prompt(
+        self,
+        prompt: str,
+        answer: str,
+        soft_prompt_embeds: torch.Tensor | None = None,
+    ) -> ScoringResult:
+        return self.score_continuations(
+            prompt,
+            {"answer": f" {answer}"},
+            soft_prompt_embeds,
+        )

@@ -1,8 +1,10 @@
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
 MMLU_LETTERS = "ABCDEFGHIJ"
+NUMERIC_PATTERN = r"-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
 
 
 def normalize_mmlu_answer(answer: Any) -> str:
@@ -32,15 +34,42 @@ def normalize_mmlu_prediction(text: str) -> str:
 
 
 def normalize_numeric_prediction(text: str) -> str:
-    numbers = re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", ""))
+    numbers = re.findall(NUMERIC_PATTERN, text.replace(",", ""))
     return numbers[-1] if numbers else text.strip()
+
+
+def normalize_gsm_answer(answer: Any) -> str:
+    return normalize_numeric_prediction(str(answer))
+
+
+def numeric_answer_variants(answer: Any) -> list[str]:
+    normalized = normalize_gsm_answer(answer)
+    variants = [normalized]
+    try:
+        value = Decimal(normalized)
+    except InvalidOperation:
+        return variants
+
+    plain = format(value, "f")
+    variants.append(plain)
+    if "." in plain:
+        stripped = plain.rstrip("0").rstrip(".")
+        variants.append(stripped if stripped not in {"", "-0"} else "0")
+    if value == value.to_integral_value():
+        variants.append(str(int(value)))
+
+    unique = []
+    for variant in variants:
+        if variant and variant not in unique:
+            unique.append(variant)
+    return unique
 
 
 def normalize_answer(dataset: str, answer: Any) -> str:
     if dataset == "mmlu_pro":
         return normalize_mmlu_answer(answer)
     if dataset == "gsm_hard":
-        return str(answer).strip()
+        return normalize_gsm_answer(answer)
     return str(answer).strip()
 
 

@@ -24,6 +24,12 @@
 - mock orchestrator / local client 평가 경로 구현
 - 단일 client CMA-ES local optimization smoke test 통과
 - 6-client 1-round FedAvg dry run 통과
+- exact-match objective와 log-prob objective 분리
+- MMLU-Pro choice log-likelihood scoring 구현
+- GSM-Hard numeric answer variant scoring 구현
+- 6-client baseline 확장 run 통과
+- 6-client 2-round dense scoring FedPAO dry run 통과
+- 외부 MAS adapter status check scaffold 추가
 
 아직 완료하지 않은 항목:
 
