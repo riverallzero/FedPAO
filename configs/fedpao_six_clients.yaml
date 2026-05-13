@@ -5,8 +5,9 @@ data:
 
 datasets:
   mmlu_pro:
-    train_split: validation
-    eval_split: validation
+    source_split: validation
+    train_ratio: 0.7
+    eval_ratio: 0.3
     test_split: test
   gsm_hard:
     source_split: train
@@ -24,7 +25,6 @@ model:
 prompt:
   type: soft_latent
   latent_dim: 32
-  intrinsic_dim: 32
   prompt_length: 8
   projection_seed: 42
   init_std: 0.02
@@ -59,7 +59,10 @@ evaluation:
     - avg_tokens
     - avg_latency
     - redundant_call_rate
-    - communication_bytes
+    - invalid_action_rate
+    - client_upload_bytes
+    - server_download_bytes
+    - total_round_bytes
 
 clients:
   - id: c1

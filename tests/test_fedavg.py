@@ -28,4 +28,3 @@ def test_weighted_fedavg():
 if __name__ == "__main__":
     test_uniform_fedavg()
     test_weighted_fedavg()
-

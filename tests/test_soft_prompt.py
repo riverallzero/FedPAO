@@ -16,12 +16,14 @@ def test_soft_prompt_shape():
 
 def test_soft_prompt_reproducible():
     z = np.ones(4, dtype=np.float32)
-    p1 = SoftPromptProjector(4, 3, 5, seed=7).project(z)
-    p2 = SoftPromptProjector(4, 3, 5, seed=7).project(z)
+    projector1 = SoftPromptProjector(4, 3, 5, seed=7)
+    projector2 = SoftPromptProjector(4, 3, 5, seed=7)
+    p1 = projector1.project(z)
+    p2 = projector2.project(z)
     assert np.allclose(p1.numpy(), p2.numpy())
+    assert projector1.projection_hash() == projector2.projection_hash()
 
 
 if __name__ == "__main__":
     test_soft_prompt_shape()
     test_soft_prompt_reproducible()
-

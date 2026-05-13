@@ -1,11 +1,13 @@
+from decimal import Decimal, InvalidOperation
+
 from .normalization import normalize_answer, normalize_prediction
 
 
 def exact_match(dataset: str, prediction: str, ground_truth: str) -> bool:
     if dataset == "gsm_hard":
         try:
-            return float(prediction) == float(ground_truth)
-        except ValueError:
+            return Decimal(prediction) == Decimal(ground_truth)
+        except InvalidOperation:
             return False
     return prediction == ground_truth
 
@@ -20,4 +22,3 @@ def score_prediction(dataset: str, response: str, answer: str) -> dict:
         "correct": correct,
         "accuracy": 1.0 if correct else 0.0,
     }
-

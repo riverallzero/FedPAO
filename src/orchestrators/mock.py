@@ -82,10 +82,13 @@ class MockOrchestrator:
             "agent_calls": 1,
             "tool_calls": 0,
             "redundant_call": 0,
+            "invalid_action": 0,
+            "invalid_tool_call_count": 0,
+            "premature_termination": 0,
+            "late_termination": 0,
         }
         return OrchestratorResult(
             trajectory=trajectory,
             final_answer=response.text,
             metrics=metrics,
         )
-

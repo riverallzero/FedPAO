@@ -102,13 +102,15 @@ Run a minimal 6-client FedPAO dry run:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_fedpao_dryrun.py \
-  --config configs/fedpao_six_clients.yaml \
+  --config configs/fedpao_smoke_taskonly.yaml \
   --rounds 1 \
   --clients-per-round 6 \
   --max-train-samples-per-client 1 \
+  --max-eval-samples-per-client 1 \
   --population-size 2 \
   --local-iterations 1 \
-  --max-new-tokens 2
+  --max-new-tokens 2 \
+  --eval-every-round
 ```
 
 List local causal model candidates:

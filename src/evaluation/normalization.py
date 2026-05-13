@@ -17,8 +17,18 @@ def normalize_mmlu_answer(answer: Any) -> str:
 
 
 def normalize_mmlu_prediction(text: str) -> str:
-    match = re.search(r"\b([A-J])\b", text.upper())
-    return match.group(1) if match else text.strip()
+    normalized = text.strip().upper()
+    patterns = [
+        r"ANSWER\s*(?:IS|:)?\s*\(?([A-J])\)?",
+        r"OPTION\s*\(?([A-J])\)?",
+        r"^\s*\(?([A-J])\)?\s*$",
+        r"\b([A-J])\b\s*$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return match.group(1)
+    return text.strip()
 
 
 def normalize_numeric_prediction(text: str) -> str:

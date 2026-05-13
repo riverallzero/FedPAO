@@ -85,6 +85,11 @@ def main() -> None:
     np.save(output_dir / "best_latent.npy", result.best_latent)
     metrics = {
         "client_id": client_config["id"],
+        "latent_dim": latent_dim,
+        "prompt_length": int(prompt_config.get("prompt_length", 8)),
+        "hidden_size": backend.hidden_size,
+        "projection_seed": int(prompt_config.get("projection_seed", config.get("seed", 42))),
+        "projection_hash": projector.projection_hash(),
         "initial_loss": initial_loss,
         "initial_metrics": initial_metrics,
         "best_loss": result.best_loss,
@@ -101,4 +106,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -303,7 +303,6 @@ model:
 prompt:
   type: soft_latent
   latent_dim: 32
-  intrinsic_dim: 32
   prompt_length: 8
   projection_seed: 42
   init_std: 0.02
@@ -438,13 +437,15 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_local_cma_smoke.py \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_fedpao_dryrun.py \
-  --config configs/fedpao_six_clients.yaml \
+  --config configs/fedpao_smoke_taskonly.yaml \
   --rounds 1 \
   --clients-per-round 6 \
   --max-train-samples-per-client 1 \
+  --max-eval-samples-per-client 1 \
   --population-size 2 \
   --local-iterations 1 \
-  --max-new-tokens 2
+  --max-new-tokens 2 \
+  --eval-every-round
 ```
 
 6-client local inference smoke test:
@@ -503,7 +504,7 @@ data/processed/splits/gsm_hard_seed42.json
 Split count:
 
 ```text
-mmlu_pro: train=70, eval=70, test=12032
+mmlu_pro: train=49, eval=21, test=12032
 gsm_hard: train=923, eval=198, test=198
 ```
 
@@ -523,16 +524,38 @@ CMA/FedAvg smoke 결과:
 ```text
 single-client CMA:
   client_id: c1
-  num_evaluations: 2
-  best_z_norm: 2.6621
+  num_evaluations: 3
+  best_z_norm: 0.0000
 
 6-client FedPAO dry run:
   rounds: 1
   clients: 6
   population_size: 2
   local_iterations: 1
-  global_z_norm: 1.2191
-  communication_bytes: 768
+  num_evaluations_per_client: 3
+  global_z_norm: 0.0000
+  client_upload_bytes: 768
+  server_download_bytes: 768
+  total_round_bytes: 1536
+```
+
+확장 smoke 결과:
+
+```text
+command: configs/fedpao_smoke_taskonly.yaml, rounds=2, clients=6, train samples=4, eval samples=4, population=4, local_iterations=2
+client_metrics rows: 12
+round metrics rows: 2
+eval_metrics rows: 12
+num_evaluations_per_client: 9
+round link check: round_001/global_latent_input.npy == round_000/global_latent_output.npy
+finite check: pass
+```
+
+주의:
+
+```text
+task-only exact-match objective에서는 모든 후보가 동률이면 initial latent가 유지된다.
+따라서 이 smoke에서 global_z_norm=0.0인 것은 성능 개선 실패가 아니라 baseline retention 동작 확인으로 해석한다.
 ```
 
 ## 12. 학습을 해야 하는가?
@@ -569,13 +592,14 @@ aggregation: FedAvg-style aggregation over client prompt latents
 ```text
 1. Broaden dry run sample size and iterations
 2. Add focused tests for FedAvg, split loading, and CMA wrapper
-3. Add validation/eval pass after each round
-4. Add MLflow/W&B offline logging hooks
-5. GPTSwarm wrapper
-6. MASRouter wrapper
-7. Puppeteer wrapper
-8. cost / latency / redundant call metric refinement
-9. full FedPAO experiment
+3. Add MLflow/W&B offline logging hooks
+4. Add baseline runners: zero latent, random latent, no soft prompt, local-only CMA
+5. Add dense scoring for MMLU option log-likelihood
+6. GPTSwarm wrapper
+7. MASRouter wrapper
+8. Puppeteer wrapper
+9. cost / latency / redundant call metric refinement
+10. full FedPAO experiment
 ```
 
 ## 14. Known Caveats
@@ -586,5 +610,5 @@ aggregation: FedAvg-style aggregation over client prompt latents
 - 외부 MAS repo는 clone되어 있지만 설치하지 않았다.
 - 현재 local inference는 adapter 없는 raw/mock prompt 방식이다.
 - embedding-level soft prompt injection은 mock orchestrator와 CMA-ES/FedAvg dry run에 연결됐지만, 아직 실제 MAS adapter에는 연결되지 않았다.
-- 현재 CMA/FedAvg 검증은 `population_size=2`, `local_iterations=1`, client당 1 sample의 smoke test라 성능 의미는 없다.
+- 현재 CMA/FedAvg 검증은 smoke test라 성능 의미는 없다. task-only objective에서 모든 후보가 동률이면 initial global latent가 baseline으로 유지되어 `z_norm=0`이 정상적으로 나올 수 있다.
 - API backend는 설정만 존재하고 smoke test는 수행하지 않았다.

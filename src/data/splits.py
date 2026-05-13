@@ -44,6 +44,37 @@ def build_split_spec(
     dataset_cfg = config.get("datasets", {}).get(dataset, {})
 
     if dataset == "mmlu_pro":
+        if "source_split" in dataset_cfg:
+            source_split = dataset_cfg.get("source_split", "validation")
+            train_ratio = float(dataset_cfg.get("train_ratio", 0.7))
+            eval_ratio = float(dataset_cfg.get("eval_ratio", 0.3))
+            indices = ratio_split_indices(
+                len(dataset_dict[source_split]),
+                seed,
+                train_ratio,
+                eval_ratio,
+            )
+            test_split = dataset_cfg.get("test_split", "test")
+            return {
+                "dataset": dataset,
+                "dataset_name": dataset_name,
+                "seed": seed,
+                "splits": {
+                    "train": {
+                        "source_split": source_split,
+                        "indices": indices["train"],
+                    },
+                    "eval": {
+                        "source_split": source_split,
+                        "indices": indices["eval"],
+                    },
+                    "test": {
+                        "source_split": test_split,
+                        "indices": list(range(len(dataset_dict[test_split]))),
+                    },
+                },
+            }
+
         train_split = dataset_cfg.get("train_split", "validation")
         eval_split = dataset_cfg.get("eval_split", train_split)
         test_split = dataset_cfg.get("test_split", "test")
@@ -95,4 +126,3 @@ def save_split_spec(spec: dict[str, Any], output_dir: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n")
     return path
-

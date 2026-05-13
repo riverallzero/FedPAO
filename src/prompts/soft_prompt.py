@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -46,3 +47,5 @@ class SoftPromptProjector:
             prompt = prompt.to(device=device, dtype=dtype)
         return prompt
 
+    def projection_hash(self) -> str:
+        return hashlib.sha1(self.projection.numpy().tobytes()).hexdigest()[:16]

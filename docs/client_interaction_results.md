@@ -269,8 +269,8 @@ outputs/local_cma_phase1/best_latent.npy
   "client_id": "c1",
   "initial_loss": 1.199,
   "best_loss": 1.199,
-  "num_evaluations": 2,
-  "best_z_norm": 2.662083864212036
+  "num_evaluations": 3,
+  "best_z_norm": 0.0
 }
 ```
 
@@ -299,7 +299,7 @@ loss = 1.0 * (1 - 0)
      = 1.199
 ```
 
-이 smoke run에서는 `population_size=2`, `local_iterations=1`이므로 candidate latent 2개만 평가했다.
+현재 구현은 initial global latent도 baseline으로 먼저 평가한다. 따라서 이 smoke run에서는 initial latent 1개와 `population_size=2`, `local_iterations=1`의 candidate latent 2개를 함께 평가해 총 3회 평가한다. candidate가 initial보다 개선되지 않으면 best latent는 initial global latent로 유지된다.
 
 ## 6. 실행 결과: 6-Client FedPAO Dry Run
 
@@ -314,14 +314,14 @@ outputs/fedpao_dryrun_phase1_seeded/round_000/global_latent_output.npy
 
 Client metrics:
 
-| round | client | MAS label | examples | local loss | local accuracy | z norm | communication bytes | evaluations |
+| round | client | MAS label | examples | local loss | local accuracy | z norm | upload bytes | evaluations |
 | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | c1 | puppeteer | 1 | 1.199 | 0.0 | 2.6621 | 128 | 2 |
-| 0 | c2 | puppeteer | 1 | 1.165 | 0.0 | 2.6547 | 128 | 2 |
-| 0 | c3 | masrouter | 1 | 1.199 | 0.0 | 2.6780 | 128 | 2 |
-| 0 | c4 | masrouter | 1 | 1.165 | 0.0 | 3.0378 | 128 | 2 |
-| 0 | c5 | gptswarm | 1 | 1.201 | 0.0 | 2.2460 | 128 | 2 |
-| 0 | c6 | gptswarm | 1 | 1.167 | 0.0 | 2.8631 | 128 | 2 |
+| 0 | c1 | puppeteer | 1 | 1.0 | 0.0 | 0.0000 | 128 | 3 |
+| 0 | c2 | puppeteer | 1 | 1.0 | 0.0 | 0.0000 | 128 | 3 |
+| 0 | c3 | masrouter | 1 | 1.0 | 0.0 | 0.0000 | 128 | 3 |
+| 0 | c4 | masrouter | 1 | 1.0 | 0.0 | 0.0000 | 128 | 3 |
+| 0 | c5 | gptswarm | 1 | 1.0 | 0.0 | 0.0000 | 128 | 3 |
+| 0 | c6 | gptswarm | 1 | 1.0 | 0.0 | 0.0000 | 128 | 3 |
 
 Round-level metrics:
 
@@ -329,8 +329,10 @@ Round-level metrics:
 {
   "round": 0,
   "num_clients": 6,
-  "global_z_norm": 1.219132900238037,
-  "communication_bytes": 768
+  "global_z_norm": 0.0,
+  "client_upload_bytes": 768,
+  "server_download_bytes": 768,
+  "total_round_bytes": 1536
 }
 ```
 
@@ -341,7 +343,9 @@ latent_dim = 32
 dtype = float32
 bytes per latent = 32 * 4 = 128
 clients = 6
-total upload bytes = 128 * 6 = 768
+client upload bytes = 128 * 6 = 768
+server download bytes = 128 * 6 = 768
+total round bytes = 1536
 ```
 
 The FedAvg output is saved at:
@@ -394,6 +398,9 @@ local_loss
 local_accuracy
 z_norm
 communication_bytes
+client_upload_bytes
+server_download_bytes
+total_round_bytes
 num_evaluations
 global_z_norm
 ```
@@ -446,4 +453,3 @@ TaskExample + z
 ```
 
 즉, 다음 구현에서 바뀌어야 할 것은 `MockOrchestrator.run()` 내부뿐이고, `LocalClient`, `CMA-ES`, `FedAvg`는 그대로 재사용하는 것이 목표다.
-

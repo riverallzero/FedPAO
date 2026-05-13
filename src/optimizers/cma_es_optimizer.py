@@ -44,10 +44,19 @@ class CmaEsOptimizer:
             options,
         )
         best_latent = initial_latent.astype(np.float32, copy=True)
-        best_loss = float("inf")
-        best_metrics: dict[str, Any] = {}
-        history: list[dict[str, Any]] = []
-        num_evaluations = 0
+        best_loss, best_metrics = objective(best_latent)
+        best_loss = float(best_loss)
+        best_metrics = dict(best_metrics)
+        history: list[dict[str, Any]] = [
+            {
+                "iteration": -1,
+                "min_loss": best_loss,
+                "mean_loss": best_loss,
+                "best_loss": best_loss,
+                "is_initial": True,
+            }
+        ]
+        num_evaluations = 1
 
         for iteration in range(self.local_iterations):
             candidates = strategy.ask()
@@ -79,4 +88,3 @@ class CmaEsOptimizer:
             num_evaluations=num_evaluations,
             history=history,
         )
-

@@ -54,6 +54,10 @@ class LocalClient:
             "avg_agent_calls": mean([row["agent_calls"] for row in rows]) if rows else 0.0,
             "avg_tool_calls": mean([row["tool_calls"] for row in rows]) if rows else 0.0,
             "redundant_call_rate": mean([row["redundant_call"] for row in rows]) if rows else 0.0,
+            "invalid_action_rate": mean([row["invalid_action"] for row in rows]) if rows else 0.0,
+            "invalid_tool_call_count": sum([row["invalid_tool_call_count"] for row in rows]),
+            "premature_termination_rate": mean([row["premature_termination"] for row in rows]) if rows else 0.0,
+            "late_termination_rate": mean([row["late_termination"] for row in rows]) if rows else 0.0,
         }
         return summary, rows
 
@@ -69,6 +73,8 @@ class LocalClient:
             * float(summary["avg_latency_sec"])
             + float(objective_config.get("redundant_call_weight", 0.0))
             * float(summary["redundant_call_rate"])
+            + float(objective_config.get("invalid_action_weight", 0.0))
+            * float(summary["invalid_action_rate"])
         )
 
     def evaluate_loss(

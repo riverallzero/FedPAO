@@ -50,6 +50,7 @@ def main() -> None:
     print(f"model_class: {type(backend.model).__name__}")
     print(f"hidden_size: {backend.hidden_size}")
     print(f"soft_prompt_shape: {tuple(soft_prompt.shape)}")
+    print(f"projection_hash: {projector.projection_hash()}")
     print(f"parameters_frozen: {frozen}")
     print(f"base_generation: {base.text!r}")
     print(f"soft_generation: {soft.text!r}")
