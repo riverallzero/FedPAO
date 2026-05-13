@@ -4,10 +4,13 @@ __pycache__/
 *.pyc
 data/cache/
 data/raw/
-data/processed/
+data/processed/*
+!data/processed/.gitkeep
+!data/processed/splits/
+!data/processed/splits/.gitkeep
+!data/processed/splits/*.json
 outputs/
 logs/
 wandb/
 mlruns/
 third_party/
-

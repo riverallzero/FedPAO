@@ -1,8 +1,23 @@
 seed: 42
 
+data:
+  split_dir: data/processed/splits
+
+datasets:
+  mmlu_pro:
+    train_split: validation
+    eval_split: validation
+    test_split: test
+  gsm_hard:
+    source_split: train
+    train_ratio: 0.7
+    eval_ratio: 0.15
+    test_ratio: 0.15
+
 model:
-  backend: hf_local
-  model_id: /data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
+  backend: hf_causal
+  model_id: /data/digirl/checkpoints/Qwen3.5-2B-Base
+  smoke_model_id: /data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
   device: cuda
   dtype: auto
 
@@ -10,6 +25,8 @@ prompt:
   type: soft_latent
   latent_dim: 32
   intrinsic_dim: 32
+  prompt_length: 8
+  projection_seed: 42
   init_std: 0.02
 
 optimizer:

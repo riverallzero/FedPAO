@@ -16,14 +16,20 @@
 - 로컬 모델 경로 설정
 - 외부 MAS repo clone
 - 6개 client별 local model inference smoke test 실행
+- deterministic dataset split 파일 생성
+- dataset loader / evaluator normalization 모듈 추가
+- inference JSONL에 `example_id`, token count, mock call metric 기록
+- Qwen3.5-2B-Base `AutoModelForCausalLM` 로딩 검증
+- frozen causal LM soft prompt embedding injection smoke test 통과
+- mock orchestrator / local client 평가 경로 구현
+- 단일 client CMA-ES local optimization smoke test 통과
+- 6-client 1-round FedAvg dry run 통과
 
 아직 완료하지 않은 항목:
 
-- 실제 FedPAO CMA-ES local prompt latent optimization 구현
-- FedAvg server round loop 구현
 - Puppeteer / MASRouter / GPT-Swarm adapter 실연동
-- soft prompt embedding injection 구현
 - full benchmark evaluation loop 구현
+- full-size hyperparameter 실험
 
 ## 2. 프로젝트 루트와 디렉토리 구조
 
@@ -58,7 +64,7 @@ Git ignore 대상:
 .env
 data/cache/
 data/raw/
-data/processed/
+data/processed/* except data/processed/splits/*.json
 outputs/
 logs/
 wandb/
@@ -224,32 +230,39 @@ python scripts/check_datasets.py
 현재 config에 설정된 모델:
 
 ```bash
-/data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
+/data/digirl/checkpoints/Qwen3.5-2B-Base
 ```
 
 이 모델을 선택한 이유:
 
-- `/data/digirl/checkpoints` 안에서 비교적 작은 로컬 모델이다.
-- 현재 설치된 `transformers`로 `AutoModelForImageTextToText` 로딩이 가능했다.
-- MMLU-Pro / GSM-Hard는 텍스트 task이므로 이미지 입력 없이 text prompt로 smoke test가 가능했다.
+- 현재 설치된 `transformers`에서 `Qwen3_5ForCausalLM`로 로딩 가능하다.
+- MMLU-Pro / GSM-Hard는 텍스트 benchmark라 causal LM backend가 soft prompt injection 구현에 더 적합하다.
+- `/data/digirl/checkpoints` 안에서 soft prompt 개발에 쓸 수 있는 2B급 후보로 확인됐다.
+
+이전 smoke test용 모델:
+
+```bash
+/data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
+```
+
+이 모델은 `model.smoke_model_id`에 남겨 두었다.
 
 간단 로딩 검증:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python - <<'PY'
 import torch
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-path = "/data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf"
-processor = AutoProcessor.from_pretrained(path, local_files_only=True)
-model = AutoModelForImageTextToText.from_pretrained(
+path = "/data/digirl/checkpoints/Qwen3.5-2B-Base"
+tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
+model = AutoModelForCausalLM.from_pretrained(
     path,
     local_files_only=True,
     dtype=torch.float16,
     device_map="auto",
 ).eval()
 
-print(type(processor).__name__)
 print(type(model).__name__)
 PY
 ```
@@ -281,8 +294,9 @@ configs/fedpao_six_clients.yaml
 
 ```yaml
 model:
-  backend: hf_local
-  model_id: /data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
+  backend: hf_causal
+  model_id: /data/digirl/checkpoints/Qwen3.5-2B-Base
+  smoke_model_id: /data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
   device: cuda
   dtype: auto
 
@@ -290,6 +304,8 @@ prompt:
   type: soft_latent
   latent_dim: 32
   intrinsic_dim: 32
+  prompt_length: 8
+  projection_seed: 42
   init_std: 0.02
 
 optimizer:
@@ -377,12 +393,67 @@ Dataset 점검:
 python scripts/check_datasets.py
 ```
 
+Dataset split 생성:
+
+```bash
+python scripts/prepare_data_splits.py --config configs/fedpao_six_clients.yaml --seed 42
+```
+
+로컬 모델 후보 점검:
+
+```bash
+python scripts/list_model_candidates.py --root /data/digirl/checkpoints
+```
+
+Soft prompt injection 점검:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/check_soft_prompt.py \
+  --config configs/fedpao_six_clients.yaml \
+  --max-new-tokens 2
+```
+
+Mock orchestrator 점검:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_mock_orchestrator.py \
+  --config configs/fedpao_six_clients.yaml \
+  --max-samples-per-client 1 \
+  --max-new-tokens 2
+```
+
+CMA-ES local optimization smoke test:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_local_cma_smoke.py \
+  --config configs/fedpao_six_clients.yaml \
+  --client-id c1 \
+  --max-train-samples 1 \
+  --population-size 2 \
+  --local-iterations 1 \
+  --max-new-tokens 2
+```
+
+6-client FedPAO dry run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_fedpao_dryrun.py \
+  --config configs/fedpao_six_clients.yaml \
+  --rounds 1 \
+  --clients-per-round 6 \
+  --max-train-samples-per-client 1 \
+  --population-size 2 \
+  --local-iterations 1 \
+  --max-new-tokens 2
+```
+
 6-client local inference smoke test:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/run_client_inference.py \
   --max-samples-per-client 1 \
-  --max-new-tokens 64
+  --max-new-tokens 8 \
+  --split-role eval
 ```
 
 기본 출력:
@@ -396,21 +467,22 @@ outputs/client_inference_smoke.jsonl
 실행한 명령:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/run_client_inference.py \
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. .venv/bin/python scripts/run_client_inference.py \
   --max-samples-per-client 1 \
-  --max-new-tokens 64 \
-  --dtype float16
+  --max-new-tokens 8 \
+  --split-role eval \
+  --output outputs/client_inference_phase1.jsonl
 ```
 
 결과 요약:
 
 ```text
 c1 puppeteer mmlu_pro: pred='B' gt='A' correct=False
-c2 puppeteer gsm_hard: pred='1' gt='-9867630.0' correct=False
+c2 puppeteer gsm_hard: free-form wrong response, gt='9.0' correct=False
 c3 masrouter mmlu_pro: pred='B' gt='A' correct=False
-c4 masrouter gsm_hard: free-form wrong response
+c4 masrouter gsm_hard: free-form wrong response, gt='9.0' correct=False
 c5 gptswarm mmlu_pro: pred='B' gt='A' correct=False
-c6 gptswarm gsm_hard: pred='1' gt='-9867630.0' correct=False
+c6 gptswarm gsm_hard: free-form wrong response, gt='9.0' correct=False
 accuracy: 0/6
 ```
 
@@ -419,7 +491,49 @@ accuracy: 0/6
 - 이 결과는 모델 성능 평가가 아니라 local model inference pipeline smoke test다.
 - 현재는 실제 Puppeteer / MASRouter / GPT-Swarm reasoning loop가 붙지 않았다.
 - 각 client는 동일 로컬 모델을 raw text prompt로 호출한다.
-- GSM-Hard 첫 예시는 의도적으로 큰 숫자를 포함한 hard sample이며, 작은 0.5B급 VLM에는 어려울 수 있다.
+- JSONL에는 `example_id`, `prompt_tokens`, `generated_tokens`, `total_tokens`, `agent_calls`, `tool_calls`가 포함된다.
+
+생성된 split 파일:
+
+```text
+data/processed/splits/mmlu_pro_seed42.json
+data/processed/splits/gsm_hard_seed42.json
+```
+
+Split count:
+
+```text
+mmlu_pro: train=70, eval=70, test=12032
+gsm_hard: train=923, eval=198, test=198
+```
+
+Soft prompt smoke test 결과:
+
+```text
+model_class: Qwen3_5ForCausalLM
+hidden_size: 2048
+soft_prompt_shape: (8, 2048)
+parameters_frozen: True
+base_generation: 'A'
+soft_generation: 'A'
+```
+
+CMA/FedAvg smoke 결과:
+
+```text
+single-client CMA:
+  client_id: c1
+  num_evaluations: 2
+  best_z_norm: 2.6621
+
+6-client FedPAO dry run:
+  rounds: 1
+  clients: 6
+  population_size: 2
+  local_iterations: 1
+  global_z_norm: 1.2191
+  communication_bytes: 768
+```
 
 ## 12. 학습을 해야 하는가?
 
@@ -453,19 +567,15 @@ aggregation: FedAvg-style aggregation over client prompt latents
 권장 순서:
 
 ```text
-1. Dataset loader module
-2. Trajectory schema
-3. Mock orchestrator interface
-4. Accuracy / exact match evaluator
-5. Local prompt latent representation
-6. CMA-ES local optimizer
-7. FedAvg server aggregation
-8. 6-client dry run
-9. GPTSwarm wrapper
-10. MASRouter wrapper
-11. Puppeteer wrapper
-12. cost / latency / redundant call metric
-13. full FedPAO experiment
+1. Broaden dry run sample size and iterations
+2. Add focused tests for FedAvg, split loading, and CMA wrapper
+3. Add validation/eval pass after each round
+4. Add MLflow/W&B offline logging hooks
+5. GPTSwarm wrapper
+6. MASRouter wrapper
+7. Puppeteer wrapper
+8. cost / latency / redundant call metric refinement
+9. full FedPAO experiment
 ```
 
 ## 14. Known Caveats
@@ -475,5 +585,6 @@ aggregation: FedAvg-style aggregation over client prompt latents
 - Codex sandbox 내부에서는 CUDA device node가 보이지 않을 수 있으므로 GPU 검증은 sandbox 밖 실행으로 해야 한다.
 - 외부 MAS repo는 clone되어 있지만 설치하지 않았다.
 - 현재 local inference는 adapter 없는 raw/mock prompt 방식이다.
-- `soft_latent` 설정은 config에 있지만 실제 embedding-level soft prompt injection은 아직 구현되지 않았다.
+- embedding-level soft prompt injection은 mock orchestrator와 CMA-ES/FedAvg dry run에 연결됐지만, 아직 실제 MAS adapter에는 연결되지 않았다.
+- 현재 CMA/FedAvg 검증은 `population_size=2`, `local_iterations=1`, client당 1 sample의 smoke test라 성능 의미는 없다.
 - API backend는 설정만 존재하고 smoke test는 수행하지 않았다.

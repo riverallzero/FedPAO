@@ -1,12 +1,10 @@
 import argparse
 import json
-import re
 import time
 from pathlib import Path
 
 import torch
 import yaml
-from datasets import load_dataset
 from dotenv import load_dotenv
 from transformers import (
     AutoModelForCausalLM,
@@ -15,11 +13,38 @@ from transformers import (
     AutoTokenizer,
 )
 
+load_dotenv()
 
-DEFAULT_MODEL_PATH = "/data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf"
+from src.data.loader import TaskExample, load_client_examples
+from src.evaluation.metrics import score_prediction
 
 
-def load_backend(model_path: str, dtype: str):
+DEFAULT_MODEL_PATH = "/data/digirl/checkpoints/Qwen3.5-2B-Base"
+
+
+def load_causal_backend(model_path: str, torch_dtype):
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        local_files_only=True,
+        dtype=torch_dtype,
+        device_map="auto",
+    )
+    return {"kind": "causal_lm", "model": model.eval(), "tokenizer": tokenizer}
+
+
+def load_image_text_backend(model_path: str, torch_dtype):
+    processor = AutoProcessor.from_pretrained(model_path, local_files_only=True)
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_path,
+        local_files_only=True,
+        dtype=torch_dtype,
+        device_map="auto",
+    )
+    return {"kind": "image_text", "model": model.eval(), "processor": processor}
+
+
+def load_backend(model_path: str, dtype: str, backend_kind: str):
     torch_dtype = {
         "auto": "auto",
         "float16": torch.float16,
@@ -27,59 +52,44 @@ def load_backend(model_path: str, dtype: str):
         "float32": torch.float32,
     }[dtype]
 
+    if backend_kind == "causal_lm":
+        return load_causal_backend(model_path, torch_dtype)
+    if backend_kind == "image_text":
+        return load_image_text_backend(model_path, torch_dtype)
+
     try:
-        processor = AutoProcessor.from_pretrained(model_path, local_files_only=True)
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_path,
-            local_files_only=True,
-            dtype=torch_dtype,
-            device_map="auto",
-        )
-        return {"kind": "image_text", "model": model.eval(), "processor": processor}
+        return load_image_text_backend(model_path, torch_dtype)
     except Exception as image_text_error:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            local_files_only=True,
-            dtype=torch_dtype,
-            device_map="auto",
-        )
-        return {
-            "kind": "causal_lm",
-            "model": model.eval(),
-            "tokenizer": tokenizer,
-            "image_text_error": repr(image_text_error),
-        }
+        backend = load_causal_backend(model_path, torch_dtype)
+        backend["image_text_error"] = repr(image_text_error)
+        return backend
 
 
-def make_prompt(client: dict, example: dict) -> tuple[str, str]:
+def make_prompt(client: dict, example: TaskExample) -> str:
     mas = client["mas"]
-    dataset = client["dataset"]
 
-    if dataset == "mmlu_pro":
+    if example.dataset == "mmlu_pro":
         letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         options = "\n".join(
-            f"{letters[idx]}. {option}" for idx, option in enumerate(example["options"])
+            f"{letters[idx]}. {option}" for idx, option in enumerate(example.options or [])
         )
-        prompt = (
+        return (
             f"You are the local frozen LLM backend for the {mas} client.\n"
             "Answer the multiple-choice question. Return only the option letter.\n\n"
-            f"Question: {example['question']}\n"
+            f"Question: {example.question}\n"
             f"Options:\n{options}\n"
             "Answer:"
         )
-        return prompt, str(example["answer"]).strip()
 
-    if dataset == "gsm_hard":
-        prompt = (
+    if example.dataset == "gsm_hard":
+        return (
             f"You are the local frozen LLM backend for the {mas} client.\n"
             "Solve the math problem. Return only the final numeric answer.\n\n"
-            f"Problem: {example['input']}\n"
+            f"Problem: {example.question}\n"
             "Answer:"
         )
-        return prompt, str(example["target"]).strip()
 
-    raise ValueError(f"Unsupported dataset: {dataset}")
+    raise ValueError(f"Unsupported dataset: {example.dataset}")
 
 
 def format_chat(processor, prompt: str) -> str:
@@ -97,7 +107,17 @@ def first_model_device(model) -> torch.device:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def generate(backend: dict, prompt: str, max_new_tokens: int) -> str:
+def generation_result(text: str, input_len: int, output_len: int) -> dict:
+    generated_tokens = max(0, output_len - input_len)
+    return {
+        "text": text.strip(),
+        "prompt_tokens": int(input_len),
+        "generated_tokens": int(generated_tokens),
+        "total_tokens": int(input_len + generated_tokens),
+    }
+
+
+def generate(backend: dict, prompt: str, max_new_tokens: int) -> dict:
     model = backend["model"]
 
     if backend["kind"] == "image_text":
@@ -112,7 +132,8 @@ def generate(backend: dict, prompt: str, max_new_tokens: int) -> str:
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
             )
-        return processor.decode(output[0][input_len:], skip_special_tokens=True).strip()
+        decoded = processor.decode(output[0][input_len:], skip_special_tokens=True)
+        return generation_result(decoded, input_len, output.shape[-1])
 
     tokenizer = backend["tokenizer"]
     inputs = tokenizer(prompt, return_tensors="pt").to(first_model_device(model))
@@ -124,28 +145,8 @@ def generate(backend: dict, prompt: str, max_new_tokens: int) -> str:
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
-    return tokenizer.decode(output[0][input_len:], skip_special_tokens=True).strip()
-
-
-def normalize_prediction(dataset: str, text: str) -> str:
-    if dataset == "mmlu_pro":
-        match = re.search(r"\b([A-J])\b", text.upper())
-        return match.group(1) if match else text.strip()
-
-    if dataset == "gsm_hard":
-        numbers = re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", ""))
-        return numbers[-1] if numbers else text.strip()
-
-    return text.strip()
-
-
-def is_correct(dataset: str, prediction: str, ground_truth: str) -> bool:
-    if dataset == "gsm_hard":
-        try:
-            return float(prediction) == float(ground_truth)
-        except ValueError:
-            return False
-    return prediction == ground_truth
+    decoded = tokenizer.decode(output[0][input_len:], skip_special_tokens=True)
+    return generation_result(decoded, input_len, output.shape[-1])
 
 
 def main() -> None:
@@ -156,60 +157,81 @@ def main() -> None:
     parser.add_argument("--max-samples-per-client", type=int, default=1)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument(
+        "--split-role",
+        choices=["train", "eval", "test"],
+        default="eval",
+    )
+    parser.add_argument(
         "--dtype",
         choices=["auto", "float16", "bfloat16", "float32"],
         default="float16",
     )
+    parser.add_argument(
+        "--backend-kind",
+        choices=["auto", "image_text", "causal_lm"],
+        default=None,
+    )
     args = parser.parse_args()
-
-    load_dotenv()
 
     with open(args.config) as file:
         config = yaml.safe_load(file)
 
     if args.model_path is None:
         args.model_path = config.get("model", {}).get("model_id", DEFAULT_MODEL_PATH)
+    if args.backend_kind is None:
+        configured_backend = config.get("model", {}).get("backend", "hf_local")
+        args.backend_kind = "causal_lm" if configured_backend == "hf_causal" else "auto"
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    backend = load_backend(args.model_path, args.dtype)
+    backend = load_backend(args.model_path, args.dtype, args.backend_kind)
 
     rows = []
     with output_path.open("w") as out:
         for client in config["clients"]:
-            dataset = load_dataset(client["dataset_name"])
-            split = "validation" if "validation" in dataset else list(dataset.keys())[0]
-            examples = dataset[split].select(
-                range(min(args.max_samples_per_client, len(dataset[split])))
+            examples = load_client_examples(
+                config,
+                client,
+                args.split_role,
+                args.max_samples_per_client,
             )
 
             for idx, example in enumerate(examples):
-                prompt, ground_truth = make_prompt(client, example)
+                prompt = make_prompt(client, example)
                 start = time.perf_counter()
                 response = generate(backend, prompt, args.max_new_tokens)
                 latency = time.perf_counter() - start
-                prediction = normalize_prediction(client["dataset"], response)
+                score = score_prediction(client["dataset"], response["text"], example.answer)
                 row = {
                     "client_id": client["id"],
                     "mas": client["mas"],
                     "dataset": client["dataset"],
                     "dataset_name": client["dataset_name"],
-                    "split": split,
+                    "split_role": args.split_role,
+                    "split": example.split,
+                    "example_id": example.task_id,
                     "example_index": idx,
                     "model_path": args.model_path,
-                    "response": response,
-                    "prediction": prediction,
-                    "ground_truth": ground_truth,
-                    "correct": is_correct(client["dataset"], prediction, ground_truth),
+                    "response": response["text"],
+                    "prediction": score["prediction"],
+                    "ground_truth": score["ground_truth"],
+                    "correct": score["correct"],
+                    "accuracy": score["accuracy"],
                     "latency_sec": round(latency, 4),
+                    "prompt_tokens": response["prompt_tokens"],
+                    "generated_tokens": response["generated_tokens"],
+                    "total_tokens": response["total_tokens"],
+                    "agent_calls": 1,
+                    "tool_calls": 0,
+                    "redundant_call": 0,
                 }
                 out.write(json.dumps(row, ensure_ascii=False) + "\n")
                 out.flush()
                 rows.append(row)
                 print(
                     f"{client['id']} {client['mas']} {client['dataset']}: "
-                    f"pred={prediction!r} gt={ground_truth!r} "
+                    f"pred={row['prediction']!r} gt={row['ground_truth']!r} "
                     f"correct={row['correct']} latency={row['latency_sec']}s"
                 )
 

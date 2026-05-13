@@ -43,6 +43,7 @@ set +a
 ```bash
 python scripts/check_env.py
 python scripts/check_datasets.py
+python scripts/prepare_data_splits.py --config configs/fedpao_six_clients.yaml --seed 42
 ```
 
 Validate the 6-client config:
@@ -64,11 +65,61 @@ Run one local-model inference sample for each configured client:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python scripts/run_client_inference.py \
   --max-samples-per-client 1 \
-  --max-new-tokens 64
+  --max-new-tokens 8 \
+  --split-role eval
+```
+
+Validate causal soft-prompt injection:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/check_soft_prompt.py \
+  --config configs/fedpao_six_clients.yaml \
+  --max-new-tokens 2
+```
+
+Run the mock orchestrator with the zero latent:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_mock_orchestrator.py \
+  --config configs/fedpao_six_clients.yaml \
+  --max-samples-per-client 1 \
+  --max-new-tokens 2
+```
+
+Run a minimal single-client CMA-ES smoke test:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_local_cma_smoke.py \
+  --config configs/fedpao_six_clients.yaml \
+  --client-id c1 \
+  --max-train-samples 1 \
+  --population-size 2 \
+  --local-iterations 1 \
+  --max-new-tokens 2
+```
+
+Run a minimal 6-client FedPAO dry run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python scripts/run_fedpao_dryrun.py \
+  --config configs/fedpao_six_clients.yaml \
+  --rounds 1 \
+  --clients-per-round 6 \
+  --max-train-samples-per-client 1 \
+  --population-size 2 \
+  --local-iterations 1 \
+  --max-new-tokens 2
+```
+
+List local causal model candidates:
+
+```bash
+python scripts/list_model_candidates.py --root /data/digirl/checkpoints
 ```
 
 ## Notes
 
 - Keep external MAS repositories under `third_party/`; they are intentionally git-ignored.
 - Start with mock orchestrators before installing GPT-Swarm, MASRouter, and Puppeteer dependencies into this environment.
-- Replace `model.model_id` in `configs/fedpao_six_clients.yaml` before running local LLM experiments.
+- The default development model is `/data/digirl/checkpoints/Qwen3.5-2B-Base` loaded through `AutoModelForCausalLM`.
+- The earlier LLaVA-OneVision checkpoint remains in `model.smoke_model_id` for image-text smoke checks.

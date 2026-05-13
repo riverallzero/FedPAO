@@ -1,0 +1,27 @@
+from src.evaluation.normalization import (
+    normalize_mmlu_answer,
+    normalize_prediction,
+)
+
+
+def test_mmlu_answer_normalization():
+    assert normalize_mmlu_answer("a") == "A"
+    assert normalize_mmlu_answer(1) == "B"
+    assert normalize_mmlu_answer("2") == "C"
+
+
+def test_mmlu_prediction_normalization():
+    assert normalize_prediction("mmlu_pro", "The answer is A.") == "A"
+    assert normalize_prediction("mmlu_pro", "option B") == "B"
+
+
+def test_gsm_prediction_normalization():
+    assert normalize_prediction("gsm_hard", "1,234") == "1234"
+    assert normalize_prediction("gsm_hard", "#### -9867630.0") == "-9867630.0"
+    assert normalize_prediction("gsm_hard", "The final answer is 42.") == "42"
+
+
+if __name__ == "__main__":
+    test_mmlu_answer_normalization()
+    test_mmlu_prediction_normalization()
+    test_gsm_prediction_normalization()
