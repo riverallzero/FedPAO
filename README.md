@@ -17,10 +17,10 @@ source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 ```
 
-Install PyTorch first using the wheel appropriate for the machine. For a CPU-only smoke test:
+Install PyTorch first using the wheel appropriate for the machine.
 
 ```bash
-pip install torch torchvision torchaudio
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
 
 Then install the FedPAO dependencies:
