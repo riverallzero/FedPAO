@@ -1,0 +1,13 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+data/cache/
+data/raw/
+data/processed/
+outputs/
+logs/
+wandb/
+mlruns/
+third_party/
+
