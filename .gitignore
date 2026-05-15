@@ -10,4 +10,4 @@ logs/
 wandb/
 mlruns/
 third_party/
-
+checkpoint/

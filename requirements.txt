@@ -32,3 +32,37 @@ openai>=1.0
 mlflow>=2.16
 wandb>=0.18
 
+# Puppeteer
+arxiv
+pathvalidate
+markdownify
+puremagic
+mammoth
+python_pptx
+pydub
+SpeechRecognition
+opencv_python_headless
+easyocr
+pytube
+whisper
+diskcache
+easydict
+pyvis
+seaborn
+chromadb
+
+# GPT-Swarm/MASRouter
+loguru
+class-registry
+shortuuid
+groq
+sentence-transformers
+tiktoken
+astunparse
+langchain-community
+python-docx
+markdown
+PyPDF2
+openpyxl
+pylatexenc
+google-api-python-client

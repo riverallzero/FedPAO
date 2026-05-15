@@ -2,7 +2,7 @@ seed: 42
 
 model:
   backend: hf_local
-  model_id: /data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
+  model_id: /data/digirl/checkpoints/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28/
   device: cuda
   dtype: auto
 
@@ -43,6 +43,12 @@ evaluation:
     - avg_latency
     - redundant_call_rate
     - communication_bytes
+
+orchestrators:
+  puppeteer:
+    reward_model_path: /data/Llama-3.1-Nemotron-70B-Reward-HF/
+    global_config: configs/orchestrators/puppeteer_global.yaml
+    policy_config: configs/orchestrators/puppeteer_policy.json
 
 clients:
   - id: c1

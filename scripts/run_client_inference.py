@@ -1,6 +1,8 @@
 import argparse
 import json
+import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -15,8 +17,16 @@ from transformers import (
     AutoTokenizer,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.orchestrators import create_orchestrator
+
 
 DEFAULT_MODEL_PATH = "/data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf"
+DEFAULT_PUPPETEER_REWARD_MODEL_PATH = "/data/Llama-3.1-Nemotron-70B-Reward-HF/"
+SUPPORTED_MAS = ("puppeteer", "masrouter", "gptswarm")
 
 
 def load_backend(model_path: str, dtype: str):
@@ -153,6 +163,34 @@ def main() -> None:
     parser.add_argument("--config", default="configs/fedpao_six_clients.yaml")
     parser.add_argument("--model-path")
     parser.add_argument("--output", default="outputs/client_inference_smoke.jsonl")
+    parser.add_argument("--third-party-dir", default="third_party")
+    parser.add_argument(
+        "--mas",
+        choices=SUPPORTED_MAS,
+        nargs="+",
+        help="Run only clients for the selected orchestrator(s).",
+    )
+    parser.add_argument(
+        "--orchestrator-mode",
+        choices=["native", "simulated"],
+        default="native",
+        help="native runs the cloned baseline framework; simulated only wraps the prompt.",
+    )
+    parser.add_argument(
+        "--puppeteer-reward-model-path",
+        default=None,
+        help="Local path for Puppeteer's reward model base.",
+    )
+    parser.add_argument(
+        "--puppeteer-global-config",
+        default=None,
+        help="FedPAO-owned Puppeteer global config projected into the native repo at runtime.",
+    )
+    parser.add_argument(
+        "--puppeteer-policy-config",
+        default=None,
+        help="FedPAO-owned Puppeteer policy config projected into the native repo at runtime.",
+    )
     parser.add_argument("--max-samples-per-client", type=int, default=1)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument(
@@ -169,6 +207,28 @@ def main() -> None:
 
     if args.model_path is None:
         args.model_path = config.get("model", {}).get("model_id", DEFAULT_MODEL_PATH)
+    if args.puppeteer_reward_model_path is None:
+        args.puppeteer_reward_model_path = (
+            config.get("orchestrators", {})
+            .get("puppeteer", {})
+            .get("reward_model_path")
+            or os.getenv("PUPPETEER_REWARD_MODEL_PATH")
+            or DEFAULT_PUPPETEER_REWARD_MODEL_PATH
+        )
+    if args.puppeteer_global_config is None:
+        args.puppeteer_global_config = (
+            config.get("orchestrators", {})
+            .get("puppeteer", {})
+            .get("global_config")
+            or "configs/orchestrators/puppeteer_global.yaml"
+        )
+    if args.puppeteer_policy_config is None:
+        args.puppeteer_policy_config = (
+            config.get("orchestrators", {})
+            .get("puppeteer", {})
+            .get("policy_config")
+            or "configs/orchestrators/puppeteer_policy.json"
+        )
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -177,7 +237,24 @@ def main() -> None:
 
     rows = []
     with output_path.open("w") as out:
-        for client in config["clients"]:
+        selected_mas = set(args.mas) if args.mas else None
+        clients = [
+            client
+            for client in config["clients"]
+            if selected_mas is None or client["mas"] in selected_mas
+        ]
+        if not clients:
+            raise ValueError(f"No clients matched --mas {args.mas}")
+
+        for client in clients:
+            orchestrator = create_orchestrator(
+                client["mas"],
+                third_party_dir=args.third_party_dir,
+                mode=args.orchestrator_mode,
+                puppeteer_reward_model_path=args.puppeteer_reward_model_path,
+                puppeteer_global_config=args.puppeteer_global_config,
+                puppeteer_policy_config=args.puppeteer_policy_config,
+            )
             dataset = load_dataset(client["dataset_name"])
             split = "validation" if "validation" in dataset else list(dataset.keys())[0]
             examples = dataset[split].select(
@@ -185,10 +262,17 @@ def main() -> None:
             )
 
             for idx, example in enumerate(examples):
-                prompt, ground_truth = make_prompt(client, example)
+                task_prompt, ground_truth = make_prompt(client, example)
+                llm_generate = lambda prompt: generate(backend, prompt, args.max_new_tokens)
                 start = time.perf_counter()
-                response = generate(backend, prompt, args.max_new_tokens)
+                orchestrated = orchestrator.run_inference(
+                    client,
+                    dict(example),
+                    task_prompt,
+                    llm_generate,
+                )
                 latency = time.perf_counter() - start
+                response = orchestrated.metadata.get("response", "")
                 prediction = normalize_prediction(client["dataset"], response)
                 row = {
                     "client_id": client["id"],
@@ -198,6 +282,8 @@ def main() -> None:
                     "split": split,
                     "example_index": idx,
                     "model_path": args.model_path,
+                    "orchestrator_mode": args.orchestrator_mode,
+                    "orchestrator_metadata": orchestrated.metadata,
                     "response": response,
                     "prediction": prediction,
                     "ground_truth": ground_truth,
