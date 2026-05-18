@@ -11,6 +11,7 @@ data/processed/*
 !data/processed/splits/*.json
 outputs/
 logs/
+checkpoint/
 wandb/
 mlruns/
 third_party/

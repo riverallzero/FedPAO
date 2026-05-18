@@ -106,6 +106,12 @@ Repo path와 필수 디렉토리 확인:
 .venv/bin/python scripts/check_orchestrators.py --config configs/fedpao_six_clients.yaml
 ```
 
+Native adapter dependency는 core FedPAO dependency와 분리했다.
+
+```bash
+.venv/bin/python -m pip install -r requirements-native.txt
+```
+
 Native MAS + soft prompt 단일 example smoke:
 
 ```bash
@@ -120,10 +126,22 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. .venv/bin/python \
 
 이 script는 adapter 실행 실패도 JSONL error row로 저장한다.
 
+## 2026-05-18 native smoke 결과
+
+아래 실행은 모두 `--latent random`, `--split-role train`, `--max-new-tokens 8` 조건에서 단일 MMLU-Pro example로 확인했다. 결과 파일은 `outputs/` 아래에 저장되며 git에는 포함하지 않는다.
+
+| MAS | client | output | 결과 | latency_sec | llm_calls | total_tokens |
+| --- | --- | --- | --- | ---: | ---: | ---: |
+| GPT-Swarm | c5 | `outputs/native_smoke_gptswarm.jsonl` | OK | 13.1011 | 6 | 2265 |
+| MASRouter | c3 | `outputs/native_smoke_masrouter.jsonl` | OK | 27.6261 | 3 | 1106 |
+| Puppeteer | c1 | `outputs/native_smoke_puppeteer.jsonl` | OK | 924.5870 | 38 | 4842 |
+
+Puppeteer는 실행 중 `/data/Llama-3.1-Nemotron-70B-Reward-HF/` reward model shard를 로드했으며, 이번 smoke에서는 policy checkpoint artifact를 `checkpoint/` 아래에 생성했다. `checkpoint/`는 생성물로 취급해 ignore한다.
+
 ## 주의사항
 
 - native mode는 여전히 smoke/integration 단계다.
-- baseline별 dependency가 현재 `.venv`에 모두 설치되어 있다고 가정하지 않는다.
+- baseline별 dependency는 `requirements-native.txt`를 통해 별도로 설치한다.
 - Puppeteer는 third_party config에 FedPAO config를 runtime projection한 뒤 정상 종료 시 복구한다.
 - process kill 또는 OOM처럼 finally가 실행되지 않는 종료에서는 third_party config를 확인해야 한다.
 - agent/tool/redundant/invalid action metric은 아직 baseline별 상세 trajectory에서 추출하지 않는다.

@@ -1,0 +1,47 @@
+# Optional dependencies for native MAS adapter smoke tests.
+# Keep separate from requirements.txt to avoid forcing heavy baseline deps
+# into the core FedPAO dry-run environment.
+
+# GPT-Swarm / shared baseline utilities
+python-docx
+loguru
+class-registry
+shortuuid
+google-api-python-client
+markdown
+PyPDF2
+openpyxl
+pylatexenc
+astunparse
+tiktoken
+termcolor
+wikipedia
+networkx
+beautifulsoup4
+arxiv
+func-timeout
+python-pptx
+pyvis
+pytube
+opencv-python-headless
+seaborn
+sentence-transformers
+
+# MASRouter
+groq
+langchain-community
+
+# Puppeteer / ChatDev-puppeteer
+chromadb
+diskcache
+easydict
+mammoth
+markdownify
+puremagic
+pathvalidate
+pydub
+SpeechRecognition
+openai-whisper
+youtube-transcript-api
+easyocr
+pdfminer.six
