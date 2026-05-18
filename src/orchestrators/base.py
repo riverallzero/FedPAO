@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import numpy as np
@@ -13,6 +13,7 @@ class OrchestratorResult:
     trajectory: list[dict[str, Any]]
     final_answer: str
     metrics: dict[str, float | int]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class OrchestratorEnv(Protocol):
@@ -22,4 +23,3 @@ class OrchestratorEnv(Protocol):
         prompt_latent: np.ndarray | None = None,
     ) -> OrchestratorResult:
         ...
-

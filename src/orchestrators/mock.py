@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from src.data.loader import TaskExample
 from src.evaluation.normalization import numeric_answer_variants
-from src.models.hf_causal import HFCausalBackend
 from src.orchestrators.base import OrchestratorResult
 from src.prompts.soft_prompt import SoftPromptProjector
+
+if TYPE_CHECKING:
+    from src.models.hf_causal import HFCausalBackend
 
 
 def format_task_prompt(client_config: dict, example: TaskExample) -> str:

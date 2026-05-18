@@ -1,10 +1,15 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import yaml
 from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 load_dotenv()
 
@@ -12,7 +17,7 @@ from src.clients.local_client import LocalClient
 from src.data.loader import load_client_examples
 from src.models.hf_causal import HFCausalBackend
 from src.optimizers.cma_es_optimizer import CmaEsOptimizer
-from src.orchestrators.mock import MockOrchestrator
+from src.orchestrators.registry import build_orchestrator
 from src.prompts.soft_prompt import SoftPromptProjector
 from src.server.fedavg import communication_bytes, fedavg
 
@@ -30,6 +35,17 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=2)
     parser.add_argument("--eval-every-round", action="store_true")
     parser.add_argument(
+        "--orchestrator-mode",
+        choices=["mock", "native"],
+        help="mock uses the FedPAO mock adapter; native calls the external MAS adapter.",
+    )
+    parser.add_argument(
+        "--mas",
+        choices=["puppeteer", "masrouter", "gptswarm"],
+        nargs="+",
+        help="Run only clients for the selected MAS adapter(s).",
+    )
+    parser.add_argument(
         "--dtype",
         choices=["auto", "float16", "bfloat16", "float32"],
         default="float16",
@@ -42,6 +58,11 @@ def main() -> None:
     prompt_config = config.get("prompt", {})
     optimizer_config = config.get("optimizer", {})
     federated_config = config.get("federated", {})
+    orchestrator_mode = (
+        args.orchestrator_mode
+        or config.get("orchestrators", {}).get("default")
+        or "mock"
+    )
     latent_dim = int(prompt_config.get("latent_dim", 32))
     rounds = args.rounds or int(federated_config.get("rounds", 10))
     clients_per_round = args.clients_per_round or int(
@@ -71,6 +92,7 @@ def main() -> None:
         "init_std": float(prompt_config.get("init_std", 0.02)),
         "projection_hash": projector.projection_hash(),
         "objective": config.get("objective", {}),
+        "orchestrator_mode": orchestrator_mode,
     }
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n"
@@ -81,7 +103,15 @@ def main() -> None:
     try:
         with metrics_path.open("w") as metrics_out, client_metrics_path.open("w") as client_out:
             for round_index in range(rounds):
-                selected_clients = config["clients"][:clients_per_round]
+                selected_mas = set(args.mas) if args.mas else None
+                matching_clients = [
+                    client
+                    for client in config["clients"]
+                    if selected_mas is None or client["mas"] in selected_mas
+                ]
+                selected_clients = matching_clients[:clients_per_round]
+                if not selected_clients:
+                    raise ValueError(f"No clients matched --mas {args.mas}")
                 local_latents = []
                 weights = []
                 client_upload_bytes = 0
@@ -97,11 +127,13 @@ def main() -> None:
                         "train",
                         args.max_train_samples_per_client,
                     )
-                    orchestrator = MockOrchestrator(
+                    orchestrator = build_orchestrator(
+                        orchestrator_mode,
                         client_config,
                         backend,
                         projector,
                         max_new_tokens=args.max_new_tokens,
+                        config=config,
                     )
                     local_client = LocalClient(client_config, orchestrator)
 
@@ -173,11 +205,13 @@ def main() -> None:
                             "eval",
                             args.max_eval_samples_per_client,
                         )
-                        orchestrator = MockOrchestrator(
+                        orchestrator = build_orchestrator(
+                            orchestrator_mode,
                             client_config,
                             backend,
                             projector,
                             max_new_tokens=args.max_new_tokens,
+                            config=config,
                         )
                         local_client = LocalClient(client_config, orchestrator)
                         eval_summary, _ = local_client.evaluate(eval_examples, global_latent)

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from src.data.loader import TaskExample
-from src.models.hf_causal import HFCausalBackend
 from src.orchestrators.base import OrchestratorResult
 from src.prompts.soft_prompt import SoftPromptProjector
+
+if TYPE_CHECKING:
+    from src.models.hf_causal import HFCausalBackend
 
 
 @dataclass(frozen=True)
@@ -52,7 +55,7 @@ class ExternalMasAdapter:
             repo_path=str(self.repo_path),
             available=not missing,
             missing=missing,
-            note="repo present; runtime integration is not enabled yet"
+            note="repo present; native mode is available if dependencies are installed"
             if not missing
             else "required adapter files are missing",
         )

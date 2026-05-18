@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from src.models.hf_causal import HFCausalBackend
+from typing import TYPE_CHECKING
+
 from src.orchestrators.adapters import ADAPTER_CLASSES, AdapterCheck
 from src.orchestrators.mock import MockOrchestrator
+from src.orchestrators.native_baselines import NATIVE_ADAPTER_CLASSES
 from src.prompts.soft_prompt import SoftPromptProjector
+
+if TYPE_CHECKING:
+    from src.models.hf_causal import HFCausalBackend
 
 
 def adapter_repo_path(config: dict, name: str) -> str | None:
@@ -13,6 +18,23 @@ def adapter_repo_path(config: dict, name: str) -> str | None:
         .get(name, {})
         .get("third_party_path")
     )
+
+
+def adapter_runtime_options(config: dict, name: str) -> dict:
+    options = dict(config.get("orchestrators", {}).get(name, {}))
+    adapter_options = (
+        config.get("orchestrators", {})
+        .get("adapters", {})
+        .get(name, {})
+    )
+    options.update(
+        {
+            key: value
+            for key, value in adapter_options.items()
+            if key != "third_party_path"
+        }
+    )
+    return options
 
 
 def build_orchestrator(
@@ -30,8 +52,22 @@ def build_orchestrator(
             projector,
             max_new_tokens=max_new_tokens,
         )
+    if kind == "native":
+        mas = client_config["mas"]
+        if mas not in NATIVE_ADAPTER_CLASSES:
+            known = sorted(NATIVE_ADAPTER_CLASSES)
+            raise ValueError(f"No native adapter for MAS {mas!r}; expected one of {known}")
+        repo_path = adapter_repo_path(config or {}, mas)
+        return NATIVE_ADAPTER_CLASSES[mas](
+            client_config,
+            backend,
+            projector,
+            max_new_tokens=max_new_tokens,
+            repo_path=repo_path,
+            **adapter_runtime_options(config or {}, mas),
+        )
     if kind not in ADAPTER_CLASSES:
-        known = ["mock", *sorted(ADAPTER_CLASSES)]
+        known = ["mock", "native", *sorted(ADAPTER_CLASSES)]
         raise ValueError(f"Unknown orchestrator kind {kind!r}; expected one of {known}")
 
     repo_path = adapter_repo_path(config or {}, kind)
