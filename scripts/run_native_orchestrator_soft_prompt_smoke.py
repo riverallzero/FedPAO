@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -107,6 +108,7 @@ def main() -> None:
                 "ok": False,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
+                "traceback": traceback.format_exc(),
             }
         )
 

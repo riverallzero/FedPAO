@@ -144,6 +144,23 @@ def patched_attr(target: Any, name: str, value: Any) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def patched_environ(updates: dict[str, str]) -> Iterator[None]:
+    sentinel = object()
+    original: dict[str, str | object] = {
+        key: os.environ.get(key, sentinel) for key in updates
+    }
+    os.environ.update(updates)
+    try:
+        yield
+    finally:
+        for key, value in original.items():
+            if value is sentinel:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = str(value)
+
+
+@contextlib.contextmanager
 def projected_yaml_config(
     source_path: Path,
     target_path: Path,
@@ -546,13 +563,23 @@ class NativeMASRouterOrchestrator(NativeMasOrchestrator):
         if not repo.exists():
             raise FileNotFoundError(f"MASRouter repo path does not exist: {repo}")
 
-        with import_context(repo, cwd=repo):
+        masrouter_cache = repo / "data" / "cache" / "huggingface"
+        env_updates = {
+            "HF_HOME": str(masrouter_cache),
+            "TRANSFORMERS_CACHE": str(masrouter_cache / "hub"),
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "TOKENIZERS_PARALLELISM": "false",
+        }
+
+        with patched_environ(env_updates), import_context(repo, cwd=repo):
             try:
                 import torch
 
                 bootstrap_masrouter_imports(repo)
                 from MAR.Agent.reasoning_profile import reasoning_profile
                 from MAR.LLM.llm import LLM
+                from MAR.LLM import llm_embedding
                 from MAR.LLM.llm_profile import llm_profile
                 from MAR.LLM.llm_registry import LLMRegistry
                 from MAR.MasRouter.mas_router import MasRouter
@@ -588,6 +615,10 @@ class NativeMASRouterOrchestrator(NativeMasOrchestrator):
                 LLMRegistry,
                 "get",
                 classmethod(lambda cls, model_name=None: FedPAOLocalLLM(model_name)),
+            ), patched_attr(
+                llm_embedding,
+                "SentenceTransformer",
+                self._local_masrouter_sentence_transformer(llm_embedding, repo),
             ):
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 router = MasRouter(max_agent=3, device=device).to(device).eval()
@@ -606,6 +637,36 @@ class NativeMASRouterOrchestrator(NativeMasOrchestrator):
             "cost": float(costs[0]) if costs else None,
             "agents_num": float(agents_num[0].item()) if len(agents_num) else None,
         }
+
+    @staticmethod
+    def _local_masrouter_sentence_transformer(llm_embedding_module: Any, repo: Path):
+        original = llm_embedding_module.SentenceTransformer
+        snapshots_dir = (
+            repo
+            / "data"
+            / "cache"
+            / "huggingface"
+            / "hub"
+            / "models--sentence-transformers--all-MiniLM-L6-v2"
+            / "snapshots"
+        )
+        snapshots = (
+            sorted(path for path in snapshots_dir.iterdir() if path.is_dir())
+            if snapshots_dir.exists()
+            else []
+        )
+        local_model = snapshots[-1] if snapshots else None
+
+        def load(model_name_or_path: str, *args: Any, **kwargs: Any):
+            if (
+                model_name_or_path == "sentence-transformers/all-MiniLM-L6-v2"
+                and local_model is not None
+            ):
+                kwargs.setdefault("local_files_only", True)
+                return original(str(local_model), *args, **kwargs)
+            return original(model_name_or_path, *args, **kwargs)
+
+        return load
 
 
 NATIVE_ADAPTER_CLASSES = {

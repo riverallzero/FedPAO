@@ -128,15 +128,48 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. .venv/bin/python \
 
 ## 2026-05-18 native smoke 결과
 
-아래 실행은 모두 `--latent random`, `--split-role train`, `--max-new-tokens 8` 조건에서 단일 MMLU-Pro example로 확인했다. 결과 파일은 `outputs/` 아래에 저장되며 git에는 포함하지 않는다.
+아래 실행은 모두 `--latent random`, `--split-role train`, `--max-new-tokens 8` 조건에서 단일 example로 확인했다. 결과 파일은 `outputs/` 아래에 저장되며 git에는 포함하지 않는다.
 
 | MAS | client | output | 결과 | latency_sec | llm_calls | total_tokens |
 | --- | --- | --- | --- | ---: | ---: | ---: |
 | GPT-Swarm | c5 | `outputs/native_smoke_gptswarm.jsonl` | OK | 13.1011 | 6 | 2265 |
+| GPT-Swarm | c6 | `outputs/native_smoke_gptswarm_gsm.jsonl` | OK | 21.4093 | 6 | 1104 |
 | MASRouter | c3 | `outputs/native_smoke_masrouter.jsonl` | OK | 27.6261 | 3 | 1106 |
+| MASRouter | c4 | `outputs/native_smoke_masrouter_gsm.jsonl` | OK | 11.4053 | 3 | 835 |
 | Puppeteer | c1 | `outputs/native_smoke_puppeteer.jsonl` | OK | 924.5870 | 38 | 4842 |
 
 Puppeteer는 실행 중 `/data/Llama-3.1-Nemotron-70B-Reward-HF/` reward model shard를 로드했으며, 이번 smoke에서는 policy checkpoint artifact를 `checkpoint/` 아래에 생성했다. `checkpoint/`는 생성물로 취급해 ignore한다.
+
+MASRouter는 repo-local `all-MiniLM-L6-v2` SentenceTransformer snapshot을 사용하도록 adapter에서 patch한다. 프로세스 시작 후 Hugging Face offline env를 바꾸는 방식은 이미 생성된 hub client에 적용되지 않아, `SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')` 호출을 cached snapshot path로 직접 우회한다.
+
+## 2026-05-18 native FedPAO dry run 결과
+
+아래 실행은 `--orchestrator-mode native`, `--rounds 1`, `--population-size 2`, `--local-iterations 1`, `--max-train-samples-per-client 1`, `--max-eval-samples-per-client 1`, `--max-new-tokens 2`, `--eval-every-round` 조건에서 확인했다. `num_evaluations=3`은 initial latent 1회와 CMA-ES candidate 2회 평가를 의미한다.
+
+| MAS | output_dir | clients | global_z_norm | total_round_bytes |
+| --- | --- | ---: | ---: | ---: |
+| GPT-Swarm | `outputs/fedpao_native_gptswarm_smoke` | 2 | 2.0113 | 512 |
+| MASRouter | `outputs/fedpao_native_masrouter_smoke` | 2 | 1.3310 | 512 |
+
+Client local update 결과:
+
+| MAS | client | local_loss | local_accuracy | num_evaluations |
+| --- | --- | ---: | ---: | ---: |
+| GPT-Swarm | c5 | 3.4910 | 0.0 | 3 |
+| GPT-Swarm | c6 | 2.3310 | 0.0 | 3 |
+| MASRouter | c3 | 1.8280 | 0.0 | 3 |
+| MASRouter | c4 | 1.9340 | 0.0 | 3 |
+
+Eval pass 결과:
+
+| MAS | client | dataset | accuracy | avg_total_tokens | avg_latency_sec |
+| --- | --- | --- | ---: | ---: | ---: |
+| GPT-Swarm | c5 | mmlu_pro | 0.0 | 1509 | 8.8756 |
+| GPT-Swarm | c6 | gsm_hard | 0.0 | 780 | 7.2305 |
+| MASRouter | c3 | mmlu_pro | 0.0 | 1281 | 8.1482 |
+| MASRouter | c4 | gsm_hard | 0.0 | 1198 | 7.7908 |
+
+이 결과는 native MAS가 FedPAO latent evaluation loop 안에서 실행되는지 확인하는 통합 smoke이며, 성능 수치로 해석하지 않는다.
 
 ## 주의사항
 
