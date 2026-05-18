@@ -33,6 +33,11 @@ def main() -> None:
     parser.add_argument("--latent", choices=["zero", "random"], default="random")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--disable-puppeteer-reward-model",
+        action="store_true",
+        help="Use a zero state/reward stub instead of Puppeteer's 70B reward model.",
+    )
+    parser.add_argument(
         "--dtype",
         choices=["auto", "float16", "bfloat16", "float32"],
         default="float16",
@@ -41,6 +46,10 @@ def main() -> None:
 
     with open(args.config) as file:
         config = yaml.safe_load(file)
+    if args.disable_puppeteer_reward_model:
+        config.setdefault("orchestrators", {}).setdefault("puppeteer", {})[
+            "disable_reward_model"
+        ] = True
 
     candidates = [
         client

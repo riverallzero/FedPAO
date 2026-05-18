@@ -160,6 +160,24 @@ def patched_environ(updates: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = str(value)
 
 
+def clear_decorated_singleton(instance_factory: Any) -> None:
+    """Clear instances captured by Puppeteer's local Singleton decorator."""
+    closure = getattr(instance_factory, "__closure__", None)
+    if closure is None:
+        return
+    for cell in closure:
+        with contextlib.suppress(ValueError):
+            value = cell.cell_contents
+        if isinstance(value, dict):
+            value.clear()
+
+
+def reset_puppeteer_agent_registry(agent_registry: Any) -> None:
+    """Drop previously materialized Puppeteer agents before another task run."""
+    agent_registry.agents.clear()
+    agent_registry.unique_agents.clear()
+
+
 @contextlib.contextmanager
 def projected_yaml_config(
     source_path: Path,
@@ -190,11 +208,17 @@ def projected_yaml_config(
 
 
 @contextlib.contextmanager
-def projected_json_config(source_path: Path, target_path: Path) -> Iterator[dict[str, Any]]:
+def projected_json_config(
+    source_path: Path,
+    target_path: Path,
+    overrides: dict[str, Any] | None = None,
+) -> Iterator[dict[str, Any]]:
     with open(target_path, "r", encoding="utf-8") as file:
         original_text = file.read()
     with open(source_path, "r", encoding="utf-8") as file:
         config = json.load(file)
+    if overrides:
+        config.update({key: value for key, value in overrides.items() if value is not None})
 
     with tempfile.NamedTemporaryFile(
         "w",
@@ -362,6 +386,11 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
                 def __init__(self, *args, **kwargs):
                     pass
 
+            disable_reward_model = bool(
+                self.runtime_options.get("disable_reward_model", False)
+            )
+            policy_overrides = {"device": {"type": "cpu"}} if disable_reward_model else None
+
             with (
                 projected_yaml_config(
                     global_config_path,
@@ -371,11 +400,16 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
                 projected_json_config(
                     policy_config_path,
                     repo / "config" / "policy.json",
+                    policy_overrides,
                 ) as policy_config,
                 patched_attr(openai, "OpenAI", _ImportOnlyOpenAI),
             ):
                 try:
-                    from inference.policy.REINFORCE_continuous import ContinuousREINFORCE
+                    from inference.policy import REINFORCE_continuous as reinforce_module
+
+                    ContinuousREINFORCE = reinforce_module.ContinuousREINFORCE
+                    from agent.register.register import agent_global_registry
+                    from inference.reasoning.reasoning import GraphReasoning
                     from model.query_manager import query_manager
                     from tasks.runner import BenchmarkRunner
                 except ModuleNotFoundError as exc:
@@ -389,6 +423,31 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
                     response = llm_generate(prompt)
                     return response, max(1, len(prompt.split()) + len(response.split()))
 
+                class _ZeroRewardModelTokenRepresentation:
+                    dim = 8192
+
+                    def __call__(self, messages):
+                        import torch
+
+                        device = "cuda" if torch.cuda.is_available() else "cpu"
+                        return torch.zeros((1, self.dim), device=device), 0.0
+
+                reward_context = (
+                    patched_attr(
+                        reinforce_module,
+                        "RewardModelTokenRepresentation",
+                        _ZeroRewardModelTokenRepresentation,
+                    )
+                    if disable_reward_model
+                    else contextlib.nullcontext()
+                )
+                original_aggregate_answers = GraphReasoning.aggregate_answers
+
+                def safe_aggregate_answers(self, global_info, answers, query_func=None):
+                    if not answers:
+                        return ""
+                    return original_aggregate_answers(self, global_info, answers, query_func)
+
                 with (
                     patched_attr(query_manager, "query", local_query),
                     patched_attr(
@@ -401,6 +460,9 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
                         "save_model",
                         lambda self, path=None, tag=None: None,
                     ),
+                    patched_attr(reinforce_module.atexit, "register", lambda *args, **kwargs: None),
+                    patched_attr(GraphReasoning, "aggregate_answers", safe_aggregate_answers),
+                    reward_context,
                 ):
                     runner = BenchmarkRunner("personas/personas.jsonl", global_config)
                     if example.dataset == "mmlu_pro":
@@ -420,6 +482,9 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
                         }
                     else:
                         raise ValueError(f"Unsupported dataset for Puppeteer: {example.dataset}")
+                    reset_puppeteer_agent_registry(agent_global_registry)
+                    clear_decorated_singleton(reinforce_module.MLP_PolicyNetwork)
+                    clear_decorated_singleton(ContinuousREINFORCE)
                     response = runner.run_reasoning(task)
 
         return str(response), {
@@ -428,6 +493,9 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
             "puppeteer_policy_config": str(policy_config_path),
             "puppeteer_policy_training": policy_config.get("training", {}).get("training"),
             "puppeteer_policy_loading": policy_config.get("training", {}).get("loading"),
+            "puppeteer_reward_model_disabled": bool(
+                self.runtime_options.get("disable_reward_model", False)
+            ),
         }
 
 

@@ -137,8 +137,11 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. .venv/bin/python \
 | MASRouter | c3 | `outputs/native_smoke_masrouter.jsonl` | OK | 27.6261 | 3 | 1106 |
 | MASRouter | c4 | `outputs/native_smoke_masrouter_gsm.jsonl` | OK | 11.4053 | 3 | 835 |
 | Puppeteer | c1 | `outputs/native_smoke_puppeteer.jsonl` | OK | 924.5870 | 38 | 4842 |
+| Puppeteer light | c1 | `outputs/native_smoke_puppeteer_light.jsonl` | OK | 115.9378 | 52 | 6407 |
 
 Puppeteer는 실행 중 `/data/Llama-3.1-Nemotron-70B-Reward-HF/` reward model shard를 로드했으며, 이번 smoke에서는 policy checkpoint artifact를 `checkpoint/` 아래에 생성했다. `checkpoint/`는 생성물로 취급해 ignore한다.
+
+Puppeteer light는 `--disable-puppeteer-reward-model` 옵션으로 확인했다. 이 모드는 Puppeteer의 70B reward model representation을 zero-vector stub으로 대체하고 policy device를 CPU로 projection한다. 목적은 full Puppeteer reward-model 성능 평가가 아니라, native Puppeteer code path가 FedPAO soft prompt 호출과 CMA-ES 반복 평가 안에서 깨지지 않는지 빠르게 확인하는 것이다.
 
 MASRouter는 repo-local `all-MiniLM-L6-v2` SentenceTransformer snapshot을 사용하도록 adapter에서 patch한다. 프로세스 시작 후 Hugging Face offline env를 바꾸는 방식은 이미 생성된 hub client에 적용되지 않아, `SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')` 호출을 cached snapshot path로 직접 우회한다.
 
@@ -171,11 +174,48 @@ Eval pass 결과:
 
 이 결과는 native MAS가 FedPAO latent evaluation loop 안에서 실행되는지 확인하는 통합 smoke이며, 성능 수치로 해석하지 않는다.
 
+## 2026-05-18 Puppeteer light FedPAO dry run
+
+Full Puppeteer는 reward model 로딩과 reasoning loop가 매우 느리므로 CMA-ES loop에는 바로 넣지 않는다. 대신 reward model을 끈 light mode로 단일 client, 단일 sample, 1 round smoke를 먼저 확인했다.
+
+실행 명령:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/run_fedpao_dryrun.py \
+  --config configs/fedpao_six_clients.yaml \
+  --orchestrator-mode native \
+  --mas puppeteer \
+  --rounds 1 \
+  --clients-per-round 1 \
+  --max-train-samples-per-client 1 \
+  --population-size 2 \
+  --local-iterations 1 \
+  --max-new-tokens 1 \
+  --disable-puppeteer-reward-model \
+  --output-dir outputs/fedpao_native_puppeteer_light_smoke
+```
+
+결과:
+
+| output_dir | client | global_z_norm | total_round_bytes | local_loss | local_accuracy | num_evaluations |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `outputs/fedpao_native_puppeteer_light_smoke` | c1 | 2.4854 | 256 | 4.8930 | 0.0 | 3 |
+
+이 실행에서 확인한 보강 사항:
+
+```text
+- Puppeteer policy singleton cache를 candidate 평가마다 초기화한다.
+- Puppeteer agent registry를 candidate 평가마다 초기화해 action space 누적을 막는다.
+- 빈 aggregate answer는 빈 문자열로 안전하게 반환한다.
+- reward model disabled mode에서는 70B reward model 대신 zero state/reward stub을 사용한다.
+```
+
 ## 주의사항
 
 - native mode는 여전히 smoke/integration 단계다.
 - baseline별 dependency는 `requirements-native.txt`를 통해 별도로 설치한다.
 - Puppeteer는 third_party config에 FedPAO config를 runtime projection한 뒤 정상 종료 시 복구한다.
+- `--disable-puppeteer-reward-model`은 integration smoke 전용 옵션이며, full Puppeteer reward-model 실험 결과와 구분해야 한다.
 - process kill 또는 OOM처럼 finally가 실행되지 않는 종료에서는 third_party config를 확인해야 한다.
 - agent/tool/redundant/invalid action metric은 아직 baseline별 상세 trajectory에서 추출하지 않는다.
 - Puppeteer는 매우 느릴 수 있으므로 GPT-Swarm, MASRouter, Puppeteer 순서로 붙이는 것이 안전하다.
