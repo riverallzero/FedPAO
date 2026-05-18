@@ -210,12 +210,50 @@ PYTHONPATH=. .venv/bin/python scripts/run_fedpao_dryrun.py \
 - reward model disabled mode에서는 70B reward model 대신 zero state/reward stub을 사용한다.
 ```
 
+## 2026-05-18 Puppeteer full reward-model FedPAO dry run
+
+Light mode 다음 단계로, Puppeteer의 70B reward model representation을 끄지 않고 FedPAO CMA-ES loop 안에서 단일 client, 단일 sample, 1 round smoke를 확인했다.
+
+실행 명령:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/run_fedpao_dryrun.py \
+  --config configs/fedpao_six_clients.yaml \
+  --orchestrator-mode native \
+  --mas puppeteer \
+  --rounds 1 \
+  --clients-per-round 1 \
+  --max-train-samples-per-client 1 \
+  --population-size 2 \
+  --local-iterations 1 \
+  --max-new-tokens 1 \
+  --output-dir outputs/fedpao_native_puppeteer_full_reward_smoke
+```
+
+결과:
+
+| output_dir | client | global_z_norm | total_round_bytes | local_loss | local_accuracy | num_evaluations |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `outputs/fedpao_native_puppeteer_full_reward_smoke` | c1 | 0.0000 | 256 | 6.0760 | 0.0 | 3 |
+
+이 실행에서 확인한 보강 사항:
+
+```text
+- Puppeteer policy device를 기본 CPU로 projection한다.
+- reward model token representation은 reward model이 실제 올라간 device를 사용한다.
+- reward model hidden state는 policy network device로 옮긴 뒤 반환한다.
+- full reward-model mode에서도 initial latent + CMA-ES candidate 2개 평가가 완료된다.
+```
+
+이 결과도 성능 수치가 아니라 native Puppeteer full reward-model path가 FedPAO candidate latent evaluation 안에서 동작하는지 확인한 통합 smoke로 해석한다.
+
 ## 주의사항
 
 - native mode는 여전히 smoke/integration 단계다.
 - baseline별 dependency는 `requirements-native.txt`를 통해 별도로 설치한다.
 - Puppeteer는 third_party config에 FedPAO config를 runtime projection한 뒤 정상 종료 시 복구한다.
 - `--disable-puppeteer-reward-model`은 integration smoke 전용 옵션이며, full Puppeteer reward-model 실험 결과와 구분해야 한다.
+- Full Puppeteer reward-model mode는 policy network만 CPU로 projection하고 reward model은 upstream `device_map="auto"` 로딩을 유지한다.
 - process kill 또는 OOM처럼 finally가 실행되지 않는 종료에서는 third_party config를 확인해야 한다.
 - agent/tool/redundant/invalid action metric은 아직 baseline별 상세 trajectory에서 추출하지 않는다.
 - Puppeteer는 매우 느릴 수 있으므로 GPT-Swarm, MASRouter, Puppeteer 순서로 붙이는 것이 안전하다.

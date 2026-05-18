@@ -389,7 +389,8 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
             disable_reward_model = bool(
                 self.runtime_options.get("disable_reward_model", False)
             )
-            policy_overrides = {"device": {"type": "cpu"}} if disable_reward_model else None
+            policy_device = str(self.runtime_options.get("policy_device", "cpu"))
+            policy_overrides = {"device": {"type": policy_device}}
 
             with (
                 projected_yaml_config(
@@ -423,14 +424,50 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
                     response = llm_generate(prompt)
                     return response, max(1, len(prompt.split()) + len(response.split()))
 
+                original_reward_model = reinforce_module.RewardModelTokenRepresentation
+
                 class _ZeroRewardModelTokenRepresentation:
                     dim = 8192
 
                     def __call__(self, messages):
                         import torch
 
-                        device = "cuda" if torch.cuda.is_available() else "cpu"
-                        return torch.zeros((1, self.dim), device=device), 0.0
+                        return torch.zeros((1, self.dim), device=policy_device), 0.0
+
+                class _DeviceAwareRewardModelTokenRepresentation(original_reward_model):
+                    def __call__(self, messages):
+                        import torch
+
+                        with torch.no_grad():
+                            messages = self.truncate(messages)
+                            tokenized_message = self.tokenizer.apply_chat_template(
+                                messages,
+                                tokenize=True,
+                                add_generation_prompt=False,
+                                return_tensors="pt",
+                                return_dict=True,
+                                max_length=4096,
+                            )
+                            model_device = getattr(self.model, "device", None)
+                            if model_device is None:
+                                model_device = next(self.model.parameters()).device
+                            input_ids = tokenized_message["input_ids"].to(model_device)
+                            attention_mask = tokenized_message["attention_mask"].to(model_device)
+                            response_token_ids = self.model.generate(
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
+                                max_new_tokens=1,
+                                return_dict_in_generate=True,
+                                output_scores=True,
+                                output_logits=True,
+                                output_hidden_states=True,
+                            )
+                            reward = response_token_ids["scores"][0][0][0].item()
+                            hidden_states = response_token_ids.hidden_states
+                            state = hidden_states[0][-1]
+                            last_state = state[:, -1, :].to(policy_device)
+                            print(reward)
+                            return last_state, reward
 
                 reward_context = (
                     patched_attr(
@@ -439,7 +476,11 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
                         _ZeroRewardModelTokenRepresentation,
                     )
                     if disable_reward_model
-                    else contextlib.nullcontext()
+                    else patched_attr(
+                        reinforce_module,
+                        "RewardModelTokenRepresentation",
+                        _DeviceAwareRewardModelTokenRepresentation,
+                    )
                 )
                 original_aggregate_answers = GraphReasoning.aggregate_answers
 
@@ -493,6 +534,7 @@ class NativePuppeteerOrchestrator(NativeMasOrchestrator):
             "puppeteer_policy_config": str(policy_config_path),
             "puppeteer_policy_training": policy_config.get("training", {}).get("training"),
             "puppeteer_policy_loading": policy_config.get("training", {}).get("loading"),
+            "puppeteer_policy_device": policy_config.get("device", {}).get("type"),
             "puppeteer_reward_model_disabled": bool(
                 self.runtime_options.get("disable_reward_model", False)
             ),
