@@ -25,8 +25,7 @@ from src.orchestrators import create_orchestrator
 
 
 DEFAULT_MODEL_PATH = "/data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf"
-DEFAULT_PUPPETEER_REWARD_MODEL_PATH = "/data/Llama-3.1-Nemotron-70B-Reward-HF/"
-SUPPORTED_MAS = ("puppeteer", "masrouter", "gptswarm")
+SUPPORTED_MAS = ("masrouter", "gptswarm")
 
 
 def load_backend(model_path: str, dtype: str):
@@ -176,21 +175,6 @@ def main() -> None:
         default="native",
         help="native runs the cloned baseline framework; simulated only wraps the prompt.",
     )
-    parser.add_argument(
-        "--puppeteer-reward-model-path",
-        default=None,
-        help="Local path for Puppeteer's reward model base.",
-    )
-    parser.add_argument(
-        "--puppeteer-global-config",
-        default=None,
-        help="FedPAO-owned Puppeteer global config projected into the native repo at runtime.",
-    )
-    parser.add_argument(
-        "--puppeteer-policy-config",
-        default=None,
-        help="FedPAO-owned Puppeteer policy config projected into the native repo at runtime.",
-    )
     parser.add_argument("--max-samples-per-client", type=int, default=1)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument(
@@ -207,28 +191,6 @@ def main() -> None:
 
     if args.model_path is None:
         args.model_path = config.get("model", {}).get("model_id", DEFAULT_MODEL_PATH)
-    if args.puppeteer_reward_model_path is None:
-        args.puppeteer_reward_model_path = (
-            config.get("orchestrators", {})
-            .get("puppeteer", {})
-            .get("reward_model_path")
-            or os.getenv("PUPPETEER_REWARD_MODEL_PATH")
-            or DEFAULT_PUPPETEER_REWARD_MODEL_PATH
-        )
-    if args.puppeteer_global_config is None:
-        args.puppeteer_global_config = (
-            config.get("orchestrators", {})
-            .get("puppeteer", {})
-            .get("global_config")
-            or "configs/orchestrators/puppeteer_global.yaml"
-        )
-    if args.puppeteer_policy_config is None:
-        args.puppeteer_policy_config = (
-            config.get("orchestrators", {})
-            .get("puppeteer", {})
-            .get("policy_config")
-            or "configs/orchestrators/puppeteer_policy.json"
-        )
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,9 +213,6 @@ def main() -> None:
                 client["mas"],
                 third_party_dir=args.third_party_dir,
                 mode=args.orchestrator_mode,
-                puppeteer_reward_model_path=args.puppeteer_reward_model_path,
-                puppeteer_global_config=args.puppeteer_global_config,
-                puppeteer_policy_config=args.puppeteer_policy_config,
             )
             dataset = load_dataset(client["dataset_name"])
             split = "validation" if "validation" in dataset else list(dataset.keys())[0]

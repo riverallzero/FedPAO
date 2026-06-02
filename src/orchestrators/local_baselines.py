@@ -43,20 +43,6 @@ class LocalBaselineOrchestrator(BaseOrchestrator):
         )
 
 
-class PuppeteerOrchestrator(LocalBaselineOrchestrator):
-    spec = OrchestratorSpec(
-        name="puppeteer",
-        display_name="Puppeteer",
-        repo_dir="ChatDev-puppeteer",
-        repo_url="https://github.com/OpenBMB/ChatDev/tree/puppeteer",
-        expected_paths=("puppeteer/main.py", "requirements.txt"),
-        summary="Centralized orchestrator that dynamically directs agent actions.",
-    )
-    orchestration_style = (
-        "central controller selects reasoning/tool agents dynamically across steps"
-    )
-
-
 class MASRouterOrchestrator(LocalBaselineOrchestrator):
     spec = OrchestratorSpec(
         name="masrouter",

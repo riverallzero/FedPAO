@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import importlib.util
 import json
 import os
@@ -11,14 +12,23 @@ import types
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+import torch
 import yaml
 
 from src.orchestrators.base import OrchestratedPrompt
 from src.orchestrators.local_baselines import (
     GPTSwarmOrchestrator,
     MASRouterOrchestrator,
-    PuppeteerOrchestrator,
 )
+
+
+def deep_update(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            deep_update(base[key], value)
+        elif value is not None:
+            base[key] = value
+    return base
 
 
 @contextlib.contextmanager
@@ -175,13 +185,19 @@ def projected_yaml_config(
 
 
 @contextlib.contextmanager
-def projected_json_config(source_path: Path, target_path: Path) -> Iterator[dict[str, Any]]:
+def projected_json_config(
+    source_path: Path,
+    target_path: Path,
+    overrides: dict[str, Any] | None = None,
+) -> Iterator[dict[str, Any]]:
     """Project a FedPAO-owned JSON config into a third_party runtime path."""
 
     with open(target_path, "r", encoding="utf-8") as file:
         original_text = file.read()
     with open(source_path, "r", encoding="utf-8") as file:
         config = json.load(file)
+    if overrides:
+        deep_update(config, overrides)
 
     with tempfile.NamedTemporaryFile(
         "w",
@@ -198,115 +214,6 @@ def projected_json_config(source_path: Path, target_path: Path) -> Iterator[dict
     finally:
         with open(target_path, "w", encoding="utf-8") as file:
             file.write(original_text)
-
-
-class NativePuppeteerOrchestrator(PuppeteerOrchestrator):
-    """Run ChatDev Puppeteer code path with FedPAO local LLM patched in."""
-
-    def run_inference(
-        self,
-        client: dict[str, Any],
-        example: dict[str, Any],
-        task_prompt: str,
-        llm_generate: Callable[[str], str],
-    ) -> OrchestratedPrompt:
-        repo = (self.repo_path / "puppeteer").resolve()
-        if not repo.exists():
-            raise FileNotFoundError(f"Puppeteer repo path does not exist: {repo}")
-
-        reward_model_path = self.runtime_options.get("puppeteer_reward_model_path")
-        global_config_path = Path(
-            self.runtime_options.get(
-                "puppeteer_global_config",
-                "configs/orchestrators/puppeteer_global.yaml",
-            )
-        ).resolve()
-        policy_config_path = Path(
-            self.runtime_options.get(
-                "puppeteer_policy_config",
-                "configs/orchestrators/puppeteer_policy.json",
-            )
-        ).resolve()
-        with import_context(repo, cwd=repo):
-            import openai
-
-            original_openai = openai.OpenAI
-
-            class _ImportOnlyOpenAI:
-                def __init__(self, *args, **kwargs):
-                    pass
-
-            with (
-                projected_yaml_config(
-                    global_config_path,
-                    repo / "config" / "global.yaml",
-                    {"model_weight_path": reward_model_path},
-                ) as global_config,
-                projected_json_config(
-                    policy_config_path,
-                    repo / "config" / "policy.json",
-                ) as policy_config,
-            ):
-                openai.OpenAI = _ImportOnlyOpenAI
-                try:
-                    from model.query_manager import query_manager
-                    from inference.policy.REINFORCE_continuous import ContinuousREINFORCE
-                    from tasks.runner import BenchmarkRunner
-                except ModuleNotFoundError as exc:
-                    raise RuntimeError(
-                        "Puppeteer native execution requires its third_party dependencies. "
-                        f"Missing module: {exc.name}"
-                    ) from exc
-                finally:
-                    openai.OpenAI = original_openai
-
-                def local_query(model_key, messages, system_prompt=None):
-                    prompt = messages_to_prompt(messages, system_prompt)
-                    response = llm_generate(prompt)
-                    return response, rough_token_count(prompt) + rough_token_count(response)
-
-                query_manager.query = local_query
-                ContinuousREINFORCE.load_model = lambda self, path, strict=True: False
-                ContinuousREINFORCE.save_model = lambda self, path=None, tag=None: None
-
-                runner = BenchmarkRunner("personas/personas.jsonl", global_config)
-                if client["dataset"] == "mmlu_pro":
-                    task = {
-                        "type": "MMLU-Pro",
-                        "Question": mmlu_question(example),
-                        "Answer": str(example["answer"]).strip(),
-                        "id": example.get("question_id", "fedpao"),
-                    }
-                elif client["dataset"] == "gsm_hard":
-                    task = {
-                        "type": "GSM-Hard",
-                        "Question": "You need to write python program to solve math problems:\n"
-                        + example["input"],
-                        "Answer": str(example["target"]).strip(),
-                        "id": "fedpao",
-                    }
-                else:
-                    raise ValueError(f"Unsupported dataset for Puppeteer: {client['dataset']}")
-
-                response = runner.run_reasoning(task)
-
-        return OrchestratedPrompt(
-            prompt=task_prompt,
-            metadata=native_metadata(
-                self,
-                "puppeteer.tasks.runner.BenchmarkRunner.run_reasoning",
-            )
-            | {
-                "response": str(response),
-                "puppeteer_reward_model_path": reward_model_path,
-                "puppeteer_global_config": str(global_config_path),
-                "puppeteer_policy_config": str(policy_config_path),
-                "puppeteer_policy_training": policy_config.get("training", {}).get("training"),
-                "puppeteer_policy_loading": policy_config.get("training", {}).get("loading"),
-                "puppeteer_policy_load_disabled": True,
-                "puppeteer_policy_save_disabled": True,
-            },
-        )
 
 
 class NativeGPTSwarmOrchestrator(GPTSwarmOrchestrator):
@@ -416,13 +323,34 @@ class NativeGPTSwarmOrchestrator(GPTSwarmOrchestrator):
             else:
                 raise ValueError(f"Unsupported dataset for GPT-Swarm: {client['dataset']}")
 
+            round0_checkpoint_path = self.runtime_options.get("round0_checkpoint_path")
             swarm = Swarm(
                 ["IO", "COT", "IO"],
                 domain,
                 model_name="fedpao_local",
-                edge_optimize=False,
+                edge_optimize=bool(round0_checkpoint_path),
             )
-            response = swarm.run({"task": task})
+            realized_graph = None
+            loaded_edges = False
+            if round0_checkpoint_path:
+                try:
+                    checkpoint = torch.load(
+                        round0_checkpoint_path,
+                        map_location="cpu",
+                        weights_only=False,
+                    )
+                except TypeError:
+                    checkpoint = torch.load(round0_checkpoint_path, map_location="cpu")
+                state_dict = checkpoint.get("connection_dist_state_dict")
+                if state_dict:
+                    swarm.connection_dist.load_state_dict(state_dict, strict=False)
+                    edge_probs = torch.sigmoid(swarm.connection_dist.edge_logits)
+                    realized_graph = swarm.connection_dist.realize_mask(
+                        swarm.composite_graph,
+                        edge_probs > 0.5,
+                    )
+                    loaded_edges = True
+            response = swarm.run({"task": task}, realized_graph=realized_graph)
 
         return OrchestratedPrompt(
             prompt=task_prompt,
@@ -433,6 +361,8 @@ class NativeGPTSwarmOrchestrator(GPTSwarmOrchestrator):
             | {
                 "swarm_domain": domain,
                 "swarm_agents": ["IO", "COT", "IO"],
+                "round0_checkpoint_path": str(round0_checkpoint_path) if round0_checkpoint_path else None,
+                "gptswarm_loaded_edges": loaded_edges,
                 "response": str(response),
             },
         )
@@ -456,6 +386,8 @@ class NativeMASRouterOrchestrator(MASRouterOrchestrator):
             try:
                 import torch
                 bootstrap_masrouter_imports(repo)
+                agent_module = importlib.import_module("MAR.Agent.agent")
+                post_process_module = importlib.import_module("MAR.Prompts.post_process")
                 from MAR.Agent.reasoning_profile import reasoning_profile
                 from MAR.LLM.llm import LLM
                 from MAR.LLM.llm_profile import llm_profile
@@ -481,6 +413,20 @@ class NativeMASRouterOrchestrator(MASRouterOrchestrator):
             LLMRegistry.get = classmethod(
                 lambda cls, model_name=None: FedPAOLocalLLM(model_name)
             )
+            original_post_process = post_process_module.post_process
+
+            def safe_post_process(raw_inputs, output, post_method):
+                try:
+                    return original_post_process(raw_inputs, output, post_method)
+                except Exception as exc:
+                    return (
+                        f"{output}\n\n"
+                        "[FedPAO warning: MASRouter post_process failed; returning raw "
+                        f"LLM output. reason={exc}]"
+                    )
+
+            post_process_module.post_process = safe_post_process
+            agent_module.post_process = safe_post_process
 
             if client["dataset"] == "mmlu_pro":
                 query = mmlu_question(example)
@@ -495,6 +441,20 @@ class NativeMASRouterOrchestrator(MASRouterOrchestrator):
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             router = MasRouter(max_agent=3, device=device).to(device).eval()
+            round0_checkpoint_path = self.runtime_options.get("round0_checkpoint_path")
+            masrouter_loaded_state = False
+            if round0_checkpoint_path:
+                try:
+                    checkpoint = torch.load(
+                        round0_checkpoint_path,
+                        map_location=device,
+                        weights_only=False,
+                    )
+                except TypeError:
+                    checkpoint = torch.load(round0_checkpoint_path, map_location=device)
+                state_dict = checkpoint.get("router_state_dict", checkpoint)
+                router.load_state_dict(state_dict, strict=False)
+                masrouter_loaded_state = True
             with torch.no_grad():
                 results, costs, _, _, _, agents_num = router.forward(
                     [query],
@@ -515,6 +475,8 @@ class NativeMASRouterOrchestrator(MASRouterOrchestrator):
             | {
                 "cost": float(costs[0]) if costs else None,
                 "agents_num": float(agents_num[0].item()) if len(agents_num) else None,
+                "round0_checkpoint_path": str(round0_checkpoint_path) if round0_checkpoint_path else None,
+                "masrouter_loaded_state": masrouter_loaded_state,
                 "response": str(response),
             },
         )

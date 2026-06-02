@@ -2,7 +2,7 @@
 
 작성일: 2026-05-15 KST
 
-이 문서는 FedPAO에서 6개 simulated client가 사용하는 orchestrator baseline 연결 상태를 정리한다. 현재 구현은 `third_party/`에 clone한 Puppeteer, MASRouter, GPT-Swarm의 native code path를 직접 호출하고, baseline 내부 LLM 호출을 FedPAO local frozen LLM callable로 우회시켜 smoke inference를 수행하는 단계다.
+이 문서는 FedPAO에서 4개 simulated client가 사용하는 orchestrator baseline 연결 상태를 정리한다. 현재 구현은 `third_party/`에 clone한 MASRouter와 GPT-Swarm의 native code path를 직접 호출하고, baseline 내부 LLM 호출을 FedPAO local frozen LLM callable로 우회시켜 smoke inference를 수행하는 단계다.
 
 현재 native mode는 full FedPAO 성능 평가가 아니라 "외부 MAS runner + 로컬 LLM backend + client별 dataset 입력"이 한 프로세스에서 연결되는지 확인하는 통합 smoke test에 가깝다.
 
@@ -10,18 +10,16 @@
 
 완료된 항목:
 
-- Puppeteer, MASRouter, GPT-Swarm repo를 `third_party/` 아래에 두는 구조 정의
+- MASRouter, GPT-Swarm repo를 `third_party/` 아래에 두는 구조 정의
 - `src/orchestrators` 공통 adapter interface 작성
-- 3개 baseline에 대한 simulated adapter와 native adapter 작성
+- 2개 baseline에 대한 simulated adapter와 native adapter 작성
 - `scripts/run_client_inference.py`가 client별 `mas` 값에 따라 adapter를 생성하도록 연결
 - 기본 실행 mode를 `native`로 설정
 - `--orchestrator-mode simulated`로 dependency-light prompt wrapping만 확인 가능
-- `--mas puppeteer|masrouter|gptswarm` 옵션으로 baseline별 부분 실행 가능
-- Puppeteer reward model, global config, policy config를 FedPAO `configs/` 아래에서 관리
-- Puppeteer native 실행 중 third_party config path에 FedPAO config를 임시 투영하고 정상 예외 흐름에서 원복
-- Puppeteer import-time OpenAI client 생성을 dummy class로 우회
-- Puppeteer `query_manager.query`를 FedPAO local LLM callable로 패치
-- Puppeteer policy checkpoint load/save 호출을 smoke inference 중 비활성화
+- `--mas masrouter|gptswarm` 옵션으로 baseline별 부분 실행 가능
+- MASRouter circular import 우회, local LLM registry patch, `torch.no_grad()` inference 적용
+- GPT-Swarm `LLMRegistry`에 `fedpao_local` backend 등록 및 `LLMRegistry.get` patch 적용
+- GPT-Swarm GSM-Hard용 `gsm_hard` prompt set runtime 등록
 - MASRouter circular import 우회, local LLM registry patch, `torch.no_grad()` inference 적용
 - GPT-Swarm `LLMRegistry`에 `fedpao_local` backend 등록 및 `LLMRegistry.get` patch 적용
 - GPT-Swarm GSM-Hard용 `gsm_hard` prompt set runtime 등록
@@ -41,7 +39,6 @@
 외부 MAS baseline repo는 모두 `third_party/` 아래에 둔다.
 
 ```text
-third_party/ChatDev-puppeteer
 third_party/masrouter
 third_party/GPTSwarm
 ```

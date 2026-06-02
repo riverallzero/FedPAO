@@ -6,23 +6,19 @@ from src.orchestrators.base import BaseOrchestrator
 from src.orchestrators.local_baselines import (
     GPTSwarmOrchestrator,
     MASRouterOrchestrator,
-    PuppeteerOrchestrator,
 )
 from src.orchestrators.native_baselines import (
     NativeGPTSwarmOrchestrator,
     NativeMASRouterOrchestrator,
-    NativePuppeteerOrchestrator,
 )
 
 
 ORCHESTRATORS: dict[str, type[BaseOrchestrator]] = {
-    "puppeteer": PuppeteerOrchestrator,
     "masrouter": MASRouterOrchestrator,
     "gptswarm": GPTSwarmOrchestrator,
 }
 
 NATIVE_ORCHESTRATORS: dict[str, type[BaseOrchestrator]] = {
-    "puppeteer": NativePuppeteerOrchestrator,
     "masrouter": NativeMASRouterOrchestrator,
     "gptswarm": NativeGPTSwarmOrchestrator,
 }

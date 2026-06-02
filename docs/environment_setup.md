@@ -38,7 +38,7 @@
 ```text
 src/clients        client별 local optimization 코드 위치
 src/server         FedAvg, aggregation, round control 코드 위치
-src/orchestrators  Puppeteer, MASRouter, GPT-Swarm wrapper 위치
+src/orchestrators  MASRouter, GPT-Swarm wrapper 위치
 src/prompts        soft prompt / latent prompt 처리 위치
 src/optimizers     CMA-ES optimizer 코드 위치
 src/evaluation     accuracy, cost, latency, redundant call metric 위치
