@@ -2,7 +2,7 @@ seed: 42
 
 model:
   backend: hf_local
-  model_id: /data/digirl/checkpoints/Qwen3-4B-Instruct/
+  model_id: /data/Qwen3-30B-A3B-Instruct-2507
   device: cuda
   dtype: auto
 
@@ -14,6 +14,7 @@ prompt:
 data:
   train_fraction: 0.8
   max_samples_per_client: 100
+  max_trajectory_samples_per_client: 3
 
 optimizer:
   name: cma_es
@@ -23,8 +24,6 @@ optimizer:
   local_batch_size: 16
 
 federated:
-  rounds: 10
-  clients_per_round: 4
   aggregation: fedavg
   weight_by: num_examples
 

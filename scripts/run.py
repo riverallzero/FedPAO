@@ -48,41 +48,6 @@ from src.orchestrators.native_baselines import (  # noqa: E402
 )
 
 
-class ScalarLogger:
-    """TensorBoard writer with a small JSONL fallback for lean environments."""
-
-    def __init__(self, log_dir: Path) -> None:
-        self.log_dir = log_dir.resolve()
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self._jsonl = None
-        try:
-            from torch.utils.tensorboard import SummaryWriter
-
-            self._writer = SummaryWriter(log_dir=str(self.log_dir))
-            self.backend = "tensorboard"
-        except Exception:
-            self._writer = None
-            self.backend = "jsonl_fallback"
-            self._jsonl = (self.log_dir / "scalars.jsonl").open("a", encoding="utf-8")
-
-    def add_scalar(self, tag: str, value: float, step: int) -> None:
-        if self._writer is not None:
-            self._writer.add_scalar(tag, value, step)
-            return
-        assert self._jsonl is not None
-        self._jsonl.write(
-            json.dumps({"tag": tag, "value": value, "step": step}) + "\n"
-        )
-        self._jsonl.flush()
-
-    def close(self) -> None:
-        if self._writer is not None:
-            self._writer.flush()
-            self._writer.close()
-        if self._jsonl is not None:
-            self._jsonl.close()
-
-
 def slugify(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
     return value.strip("-") or "run"
@@ -199,14 +164,14 @@ def split_client_examples(
     return f"{sample_label}_train_{train_pct}pct", train_examples, f"{sample_label}_valid_{valid_pct}pct", valid_examples
 
 
-def split_client_examples_with_heldout(
+def split_client_examples_with_trajectory(
     client: dict[str, Any],
     train_fraction: float,
     seed: int,
     sample_limit: int | None = None,
     train_limit: int | None = None,
     valid_limit: int | None = None,
-    heldout_limit: int | None = None,
+    trajectory_limit: int | None = None,
 ) -> tuple[
     str,
     list[dict[str, Any]],
@@ -222,7 +187,7 @@ def split_client_examples_with_heldout(
     random.Random(split_seed).shuffle(indices)
 
     train_valid_indices = indices[:sample_limit] if sample_limit is not None else indices
-    heldout_indices = indices[sample_limit:] if sample_limit is not None else []
+    trajectory_indices = indices[sample_limit:] if sample_limit is not None else []
     train_size = int(len(train_valid_indices) * train_fraction)
     train_size = (
         min(max(train_size, 1), max(len(train_valid_indices) - 1, 1))
@@ -236,15 +201,15 @@ def split_client_examples_with_heldout(
     if valid_limit is not None:
         valid_indices = valid_indices[:valid_limit]
 
-    if not heldout_indices:
+    if not trajectory_indices:
         used_indices = set(train_indices) | set(valid_indices)
-        heldout_indices = [index for index in indices if index not in used_indices]
-    if heldout_limit is not None:
-        heldout_indices = heldout_indices[:heldout_limit]
+        trajectory_indices = [index for index in indices if index not in used_indices]
+    if trajectory_limit is not None:
+        trajectory_indices = trajectory_indices[:trajectory_limit]
 
     train_examples = [dict(row) for row in dataset.select(train_indices)]
     valid_examples = [dict(row) for row in dataset.select(valid_indices)]
-    heldout_examples = [dict(row) for row in dataset.select(heldout_indices)]
+    trajectory_examples = [dict(row) for row in dataset.select(trajectory_indices)]
     sample_label = (
         "full" if sample_limit is None else f"sample{len(train_valid_indices)}"
     )
@@ -256,7 +221,7 @@ def split_client_examples_with_heldout(
         f"{sample_label}_valid_{valid_pct}pct",
         valid_examples,
         f"{sample_label}_heldout",
-        heldout_examples,
+        trajectory_examples,
     )
 
 
@@ -404,7 +369,6 @@ def train_gptswarm_native(
     client: dict[str, Any],
     examples: list[dict[str, Any]],
     checkpoint_dir: Path,
-    logger: ScalarLogger,
     llm_generate,
 ) -> tuple[Path, dict[str, Any]]:
     repo = (Path(args.third_party_dir) / "GPTSwarm").resolve()
@@ -434,9 +398,6 @@ def train_gptswarm_native(
             loss, utilities = asyncio.run(run_gptswarm_batch(swarm, domain, client, batch))
             loss.backward()
             optimizer.step()
-            logger.add_scalar("train/loss", float(loss.item()), step)
-            logger.add_scalar("train/utility", float(sum(utilities) / len(utilities)), step)
-            logger.add_scalar("train/epoch", float(epoch), step)
             num_steps = step + 1
 
         edge_probs = torch.sigmoid(swarm.connection_dist.edge_logits).detach().cpu()
@@ -519,7 +480,6 @@ def train_masrouter_native(
     client: dict[str, Any],
     examples: list[dict[str, Any]],
     checkpoint_dir: Path,
-    logger: ScalarLogger,
     llm_generate,
 ) -> tuple[Path, dict[str, Any]]:
     repo = (Path(args.third_party_dir) / "masrouter").resolve()
@@ -576,9 +536,6 @@ def train_masrouter_native(
             loss = task_loss + answer_loss + vae_loss.mean() * 0.001
             loss.backward()
             optimizer.step()
-            logger.add_scalar("train/loss", float(loss.item()), step)
-            logger.add_scalar("train/accuracy", float(sum(correct) / len(correct)), step)
-            logger.add_scalar("train/epoch", float(epoch), step)
             num_steps = step + 1
 
         checkpoint = {
@@ -607,13 +564,12 @@ def train_client_native(
     client: dict[str, Any],
     examples: list[dict[str, Any]],
     checkpoint_dir: Path,
-    logger: ScalarLogger,
     llm_generate,
 ) -> tuple[Path, dict[str, Any]]:
     if client["mas"] == "gptswarm":
-        return train_gptswarm_native(args, config, client, examples, checkpoint_dir, logger, llm_generate)
+        return train_gptswarm_native(args, config, client, examples, checkpoint_dir, llm_generate)
     if client["mas"] == "masrouter":
-        return train_masrouter_native(args, config, client, examples, checkpoint_dir, logger, llm_generate)
+        return train_masrouter_native(args, config, client, examples, checkpoint_dir, llm_generate)
     raise ValueError(f"Unsupported native trainer for {client['mas']}")
 
 
@@ -622,7 +578,6 @@ def train_artifact_placeholder(
     client: dict[str, Any],
     num_examples: int,
     checkpoint_path: Path,
-    logger: ScalarLogger,
     rng: random.Random,
     iterations: int,
     *,
@@ -643,21 +598,16 @@ def train_artifact_placeholder(
     best_objective = None
     for step in range(iterations):
         objective = max(0.0, 1.0 - 0.03 * step + rng.uniform(-0.01, 0.01))
-        accuracy_proxy = min(1.0, 0.20 + 0.02 * step + rng.uniform(0.0, 0.02))
-        logger.add_scalar("train/objective", objective, step)
-        logger.add_scalar("train/accuracy_proxy", accuracy_proxy, step)
-        logger.add_scalar("train/num_examples", float(num_examples), step)
         best_objective = objective if best_objective is None else min(best_objective, objective)
     state["metrics"] = {
         "best_objective": best_objective,
-        "num_logged_steps": iterations,
-        "tensorboard_backend": logger.backend,
+        "num_optimization_steps": iterations,
     }
     torch.save(state, checkpoint_path)
     return checkpoint_path, {
         "trainer": "artifact_placeholder",
         "best_objective": best_objective,
-        "num_logged_steps": iterations,
+        "num_optimization_steps": iterations,
     }
 
 
@@ -673,7 +623,6 @@ def train_client_with_prompt(
     round_index: int,
 ) -> dict[str, Any]:
     checkpoint_dir = client_dir / "checkpoints"
-    tb_dir = client_dir / "tensorboard"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     payload = hydra_payload(config, client, round_index, train_split, len(train_examples))
     save_hydra_files(client_dir, payload)
@@ -689,36 +638,30 @@ def train_client_with_prompt(
     iterations = int(optimizer_cfg.get("local_iterations", 5))
     seed = int(config.get("seed", 42)) + round_index * 10007
     rng = random.Random(seed)
-    logger = ScalarLogger(tb_dir)
-    try:
-        if args.round0_trainer == "native":
-            if not train_examples:
-                raise RuntimeError(f"No training examples loaded for {client['id']}")
-            checkpoint_path, train_metadata = train_client_native(
-                args,
-                config,
-                client,
-                train_examples,
-                checkpoint_dir,
-                logger,
-                llm_generate,
-            )
-        else:
-            checkpoint_path = checkpoint_dir / f"model_round{round_index}.pt"
-            checkpoint_path, train_metadata = train_artifact_placeholder(
-                config,
-                client,
-                len(train_examples),
-                checkpoint_path,
-                logger,
-                rng,
-                iterations,
-                round_index=round_index,
-                prompt_state=prompt_state,
-            )
-            train_metadata["trainer"] = "artifact_placeholder_with_embedding_soft_prompt"
-    finally:
-        logger.close()
+    if args.round0_trainer == "native":
+        if not train_examples:
+            raise RuntimeError(f"No training examples loaded for {client['id']}")
+        checkpoint_path, train_metadata = train_client_native(
+            args,
+            config,
+            client,
+            train_examples,
+            checkpoint_dir,
+            llm_generate,
+        )
+    else:
+        checkpoint_path = checkpoint_dir / f"model_round{round_index}.pt"
+        checkpoint_path, train_metadata = train_artifact_placeholder(
+            config,
+            client,
+            len(train_examples),
+            checkpoint_path,
+            rng,
+            iterations,
+            round_index=round_index,
+            prompt_state=prompt_state,
+        )
+        train_metadata["trainer"] = "artifact_placeholder_with_embedding_soft_prompt"
 
     return {
         "client_id": client["id"],
@@ -729,8 +672,6 @@ def train_client_with_prompt(
         "num_examples": len(train_examples),
         "hydra_run_dir": str(client_dir),
         "checkpoint_path": str(checkpoint_path),
-        "tensorboard_log_dir": str(tb_dir),
-        "tensorboard_backend": logger.backend,
         "trainer": train_metadata["trainer"],
         "train_metadata": train_metadata
         | {
@@ -825,11 +766,9 @@ def validate_round0_client(
     valid_split: str,
     valid_examples: list[dict[str, Any]],
     checkpoint_path: Path,
-    logger: ScalarLogger,
     backend: dict[str, Any],
 ) -> dict[str, Any]:
     if not valid_examples:
-        logger.add_scalar("valid/num_examples", 0.0, 0)
         return {"split": valid_split, "num_examples": 0, "accuracy": None}
 
     orchestrator = create_orchestrator(
@@ -840,7 +779,7 @@ def validate_round0_client(
     )
     llm_generate = lambda prompt: generate(backend, prompt, args.max_new_tokens)
     correct = 0
-    for step, example in enumerate(valid_examples):
+    for example in valid_examples:
         task_prompt, ground_truth = make_prompt(client, example)
         orchestrated = orchestrator.run_inference(
             client,
@@ -852,12 +791,8 @@ def validate_round0_client(
         prediction = normalize_prediction(client["dataset"], response)
         ok = is_correct(client["dataset"], prediction, ground_truth)
         correct += int(ok)
-        logger.add_scalar("valid/example_accuracy", float(ok), step)
-        logger.add_scalar("valid/running_accuracy", correct / (step + 1), step)
 
     accuracy = correct / len(valid_examples)
-    logger.add_scalar("valid/accuracy", accuracy, 0)
-    logger.add_scalar("valid/num_examples", float(len(valid_examples)), 0)
     return {
         "split": valid_split,
         "num_examples": len(valid_examples),
@@ -903,64 +838,55 @@ def round0_train(
         client_name = slugify(f"{client['id']}_{client['mas']}_{client['dataset']}")
         client_dir = round_dir / client_name
         checkpoint_dir = client_dir / "checkpoints"
-        tb_dir = client_dir / "tensorboard"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        logger = ScalarLogger(tb_dir)
-        try:
-            if args.round0_trainer == "native":
-                if backend is None:
-                    raise RuntimeError("native round0 training requires an LLM backend")
-                if not examples:
-                    raise RuntimeError(f"No training examples loaded for {client['id']}")
-                payload = hydra_payload(config, client, 0, split, num_examples)
-                save_hydra_files(client_dir, payload)
-                llm_generate = lambda prompt: generate(backend, prompt, args.max_new_tokens)
-                checkpoint_path, train_metadata = train_client_native(
+        if args.round0_trainer == "native":
+            if backend is None:
+                raise RuntimeError("native round0 training requires an LLM backend")
+            if not examples:
+                raise RuntimeError(f"No training examples loaded for {client['id']}")
+            payload = hydra_payload(config, client, 0, split, num_examples)
+            save_hydra_files(client_dir, payload)
+            llm_generate = lambda prompt: generate(backend, prompt, args.max_new_tokens)
+            checkpoint_path, train_metadata = train_client_native(
+                args,
+                config,
+                client,
+                examples,
+                checkpoint_dir,
+                llm_generate,
+            )
+            if args.max_valid_samples_per_client != 0:
+                train_metadata["validation"] = validate_round0_client(
                     args,
-                    config,
                     client,
-                    examples,
-                    checkpoint_dir,
-                    logger,
-                    llm_generate,
-                )
-                if args.max_valid_samples_per_client != 0:
-                    train_metadata["validation"] = validate_round0_client(
-                        args,
-                        client,
-                        valid_split,
-                        valid_examples,
-                        checkpoint_path,
-                        logger,
-                        backend,
-                    )
-            else:
-                payload = hydra_payload(config, client, 0, split, num_examples)
-                save_hydra_files(client_dir, payload)
-                checkpoint_path = checkpoint_dir / "model_round0.pt"
-                checkpoint_path, train_metadata = train_artifact_placeholder(
-                    config,
-                    client,
-                    num_examples,
+                    valid_split,
+                    valid_examples,
                     checkpoint_path,
-                    logger,
-                    rng,
-                    iterations,
-                    round_index=0,
+                    backend,
                 )
-                if args.max_valid_samples_per_client != 0 and backend is not None:
-                    train_metadata["validation"] = validate_round0_client(
-                        args,
-                        client,
-                        valid_split,
-                        valid_examples,
-                        checkpoint_path,
-                        logger,
-                        backend,
-                    )
-        finally:
-            logger.close()
+        else:
+            payload = hydra_payload(config, client, 0, split, num_examples)
+            save_hydra_files(client_dir, payload)
+            checkpoint_path = checkpoint_dir / "model_round0.pt"
+            checkpoint_path, train_metadata = train_artifact_placeholder(
+                config,
+                client,
+                num_examples,
+                checkpoint_path,
+                rng,
+                iterations,
+                round_index=0,
+            )
+            if args.max_valid_samples_per_client != 0 and backend is not None:
+                train_metadata["validation"] = validate_round0_client(
+                    args,
+                    client,
+                    valid_split,
+                    valid_examples,
+                    checkpoint_path,
+                    backend,
+                )
 
         client_record = {
             "client_id": client["id"],
@@ -973,8 +899,6 @@ def round0_train(
             "num_valid_examples": len(valid_examples),
             "hydra_run_dir": str(client_dir),
             "checkpoint_path": str(checkpoint_path),
-            "tensorboard_log_dir": str(tb_dir),
-            "tensorboard_backend": logger.backend,
             "trainer": train_metadata["trainer"],
             "train_metadata": train_metadata,
         }
@@ -1002,27 +926,6 @@ def load_round0_models(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "state": state,
         }
     return loaded
-
-
-def round1_client_examples(
-    args: argparse.Namespace,
-    config: dict[str, Any],
-    client: dict[str, Any],
-) -> tuple[str, list[dict[str, Any]]]:
-    data_cfg = config.get("data", {})
-    train_fraction = float(data_cfg.get("train_fraction", 0.8))
-    sample_limit = data_cfg.get("max_samples_per_client")
-    sample_limit = int(sample_limit) if sample_limit is not None else None
-    _, _, _, _, heldout_split, heldout_examples = split_client_examples_with_heldout(
-        client,
-        train_fraction,
-        int(config.get("seed", 42)),
-        sample_limit=sample_limit,
-        train_limit=args.max_train_samples_per_client,
-        valid_limit=args.max_valid_samples_per_client,
-        heldout_limit=args.max_samples_per_client,
-    )
-    return heldout_split, heldout_examples
 
 
 def compact_text(value: str, limit: int = 4000) -> str:
@@ -1129,10 +1032,6 @@ def build_summary_agent_prompt(client: dict[str, Any], rows: list[dict[str, Any]
 
             Write at most 3 sentences in natural language. Do not use bullets.\n\n
         """
-        # "You are the summary agent. Analyze the previous round trajectories for one client "
-        # "and write at most 3 sentences that a next round orchestrator can use. Focus on "
-        # "which question types benefited from which agent/orchestrator behavior, which calls "
-        # "looked wasteful or harmful, and one concrete routing recommendation. Do not use bullets.\n\n"
         f"Client: {client['id']} / {client['mas']} / {client['dataset']}\n"
         f"Trajectory observations:\n{json.dumps(observations, ensure_ascii=False, indent=2)}"
     )
@@ -1754,7 +1653,6 @@ def rebase_round0_manifest_paths(
     path_keys = (
         "hydra_run_dir",
         "checkpoint_path",
-        "tensorboard_log_dir",
         "previous_checkpoint_path",
         "analysis_report_path",
         "prompt_artifact_path",
@@ -1769,6 +1667,112 @@ def rebase_round0_manifest_paths(
         if isinstance(global_prompt.get(key), str):
             global_prompt[key] = rebase_path_to_run_root(global_prompt[key], run_root)
     return manifest
+
+
+def run_orchestrator_examples(
+    *,
+    args: argparse.Namespace,
+    client: dict[str, Any],
+    examples: list[dict[str, Any]],
+    split: str,
+    role: str,
+    round_index: int,
+    orchestrator,
+    llm_generate,
+    model_path: str,
+    record: dict[str, Any],
+    state: dict[str, Any],
+    global_prompt_artifact: str | None,
+    global_prompt_enabled: bool,
+    output_file,
+) -> list[dict[str, Any]]:
+    rows = []
+    for idx, example in enumerate(examples):
+        task_prompt, ground_truth = make_prompt(client, example)
+        start = time.perf_counter()
+        stdout_buffer = io.StringIO()
+        stderr_buffer = io.StringIO()
+        with (
+            contextlib.redirect_stdout(stdout_buffer),
+            contextlib.redirect_stderr(stderr_buffer),
+        ):
+            orchestrated = orchestrator.run_inference(
+                client,
+                dict(example),
+                task_prompt,
+                llm_generate,
+            )
+        latency = time.perf_counter() - start
+        stdout_text = stdout_buffer.getvalue()
+        stderr_text = stderr_buffer.getvalue()
+        printable_stdout, suppressed_stdout_errors = filter_third_party_execution_noise(
+            stdout_text
+        )
+        printable_stderr, suppressed_stderr_errors = filter_third_party_execution_noise(
+            stderr_text
+        )
+        suppressed_execution_errors = suppressed_stdout_errors + suppressed_stderr_errors
+        if printable_stdout:
+            print(printable_stdout, end="")
+        if printable_stderr:
+            print(printable_stderr, end="", file=sys.stderr)
+        if suppressed_execution_errors:
+            print(
+                f"round{round_index} {client['id']} suppressed "
+                f"{suppressed_execution_errors} third-party node retry errors; "
+                "full text is saved in trajectories.jsonl"
+            )
+        response = orchestrated.metadata.get("response", "")
+        prediction = normalize_prediction(client["dataset"], response)
+        correct = is_correct(client["dataset"], prediction, ground_truth)
+        trajectory = trajectory_from_run(
+            client=client,
+            example=dict(example),
+            task_prompt=task_prompt,
+            ground_truth=ground_truth,
+            orchestrated=orchestrated,
+            response=response,
+            prediction=prediction,
+            correct=correct,
+            latency=latency,
+            stdout_text=stdout_text,
+            stderr_text=stderr_text,
+        )
+        row = {
+            "round": round_index,
+            "client_id": client["id"],
+            "mas": client["mas"],
+            "dataset": client["dataset"],
+            "dataset_name": client["dataset_name"],
+            "split": split,
+            "role": role,
+            "example_index": idx,
+            "model_path": model_path,
+            "previous_checkpoint_path": record["checkpoint_path"],
+            "previous_hydra_run_dir": record["hydra_run_dir"],
+            "previous_loaded_prompt_type": state.get("prompt_type"),
+            "previous_loaded_latent_dim": state.get("latent_dim"),
+            "orchestrator_mode": args.orchestrator_mode,
+            "global_prompt_artifact": global_prompt_artifact,
+            "embedding_soft_prompt_enabled": global_prompt_enabled,
+            "suppressed_execution_errors": suppressed_execution_errors,
+            "orchestrator_metadata": orchestrated.metadata,
+            "trajectory": trajectory,
+            "response": response,
+            "prediction": prediction,
+            "ground_truth": ground_truth,
+            "correct": correct,
+            "latency_sec": round(latency, 4),
+        }
+        output_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+        output_file.flush()
+        rows.append(row)
+        print(
+            f"round{round_index} {role} {client['id']} {client['mas']} {client['dataset']}: "
+            f"pred={prediction!r} gt={ground_truth!r} "
+            f"correct={row['correct']} latency={row['latency_sec']}s"
+        )
+    return rows
 
 
 def run_federated_round(
@@ -1818,128 +1822,85 @@ def run_federated_round(
             train_fraction = float(data_cfg.get("train_fraction", 0.8))
             sample_limit = data_cfg.get("max_samples_per_client")
             sample_limit = int(sample_limit) if sample_limit is not None else None
+            trajectory_limit = (
+                args.max_samples_per_client
+                if args.max_samples_per_client is not None
+                else data_cfg.get("max_trajectory_samples_per_client", 3)
+            )
+            trajectory_limit = (
+                int(trajectory_limit) if trajectory_limit is not None else None
+            )
             (
                 train_split,
                 train_examples,
                 valid_split,
                 valid_examples,
                 trajectory_split,
-                examples,
-            ) = split_client_examples_with_heldout(
+                trajectory_examples,
+            ) = split_client_examples_with_trajectory(
                 client,
                 train_fraction,
                 int(config.get("seed", 42)),
                 sample_limit=sample_limit,
                 train_limit=args.max_train_samples_per_client,
                 valid_limit=args.max_valid_samples_per_client,
-                heldout_limit=args.max_samples_per_client,
+                trajectory_limit=trajectory_limit,
             )
-            if not examples:
+            if not valid_examples:
+                raise RuntimeError(
+                    "No validation examples available for round accuracy for "
+                    f"{client['id']}. Set data.max_samples_per_client below the "
+                    "dataset size or reduce split limits."
+                )
+            if not trajectory_examples:
                 raise RuntimeError(
                     "No held-out examples available for trajectory analysis for "
                     f"{client['id']}. Set data.max_samples_per_client below the "
-                    "dataset size or reduce train/valid limits."
+                    "dataset size or reduce split limits."
                 )
             client_name = slugify(f"{client['id']}_{client['mas']}_{client['dataset']}")
             client_dir = round_dir / client_name
             client_dir.mkdir(parents=True, exist_ok=True)
-            client_rows = []
-
-            for idx, example in enumerate(examples):
-                task_prompt, ground_truth = make_prompt(client, example)
-                start = time.perf_counter()
-                stdout_buffer = io.StringIO()
-                stderr_buffer = io.StringIO()
-                with (
-                    contextlib.redirect_stdout(stdout_buffer),
-                    contextlib.redirect_stderr(stderr_buffer),
-                ):
-                    orchestrated = orchestrator.run_inference(
-                        client,
-                        dict(example),
-                        task_prompt,
-                        llm_generate,
-                    )
-                latency = time.perf_counter() - start
-                stdout_text = stdout_buffer.getvalue()
-                stderr_text = stderr_buffer.getvalue()
-                printable_stdout, suppressed_stdout_errors = filter_third_party_execution_noise(
-                    stdout_text
-                )
-                printable_stderr, suppressed_stderr_errors = filter_third_party_execution_noise(
-                    stderr_text
-                )
-                suppressed_execution_errors = (
-                    suppressed_stdout_errors + suppressed_stderr_errors
-                )
-                if printable_stdout:
-                    print(printable_stdout, end="")
-                if printable_stderr:
-                    print(printable_stderr, end="", file=sys.stderr)
-                if suppressed_execution_errors:
-                    print(
-                        f"round{round_index} {client['id']} suppressed "
-                        f"{suppressed_execution_errors} third-party node retry errors; "
-                        "full text is saved in trajectories.jsonl"
-                    )
-                response = orchestrated.metadata.get("response", "")
-                prediction = normalize_prediction(client["dataset"], response)
-                correct = is_correct(client["dataset"], prediction, ground_truth)
-                trajectory = trajectory_from_run(
-                    client=client,
-                    example=dict(example),
-                    task_prompt=task_prompt,
-                    ground_truth=ground_truth,
-                    orchestrated=orchestrated,
-                    response=response,
-                    prediction=prediction,
-                    correct=correct,
-                    latency=latency,
-                    stdout_text=stdout_text,
-                    stderr_text=stderr_text,
-                )
-                row = {
-                    "round": round_index,
-                    "client_id": client["id"],
-                    "mas": client["mas"],
-                    "dataset": client["dataset"],
-                    "dataset_name": client["dataset_name"],
-                    "split": trajectory_split,
-                    "example_index": idx,
-                    "model_path": args.model_path,
-                    "previous_checkpoint_path": record["checkpoint_path"],
-                    "previous_hydra_run_dir": record["hydra_run_dir"],
-                    "previous_tensorboard_log_dir": record["tensorboard_log_dir"],
-                    "previous_loaded_prompt_type": state.get("prompt_type"),
-                    "previous_loaded_latent_dim": state.get("latent_dim"),
-                    "orchestrator_mode": args.orchestrator_mode,
-                    "global_prompt_artifact": global_prompt_artifact,
-                    "embedding_soft_prompt_enabled": global_prompt_state is not None,
-                    "suppressed_execution_errors": suppressed_execution_errors,
-                    "orchestrator_metadata": orchestrated.metadata,
-                    "trajectory": trajectory,
-                    "response": response,
-                    "prediction": prediction,
-                    "ground_truth": ground_truth,
-                    "correct": correct,
-                    "latency_sec": round(latency, 4),
-                }
-                out.write(json.dumps(row, ensure_ascii=False) + "\n")
-                out.flush()
-                rows.append(row)
-                client_rows.append(row)
-                print(
-                    f"round{round_index} {client['id']} {client['mas']} {client['dataset']}: "
-                    f"pred={prediction!r} gt={ground_truth!r} "
-                    f"correct={row['correct']} latency={row['latency_sec']}s"
-                )
+            client_valid_rows = run_orchestrator_examples(
+                args=args,
+                client=client,
+                examples=valid_examples,
+                split=valid_split,
+                role="validation",
+                round_index=round_index,
+                orchestrator=orchestrator,
+                llm_generate=llm_generate,
+                model_path=args.model_path,
+                record=record,
+                state=state,
+                global_prompt_artifact=global_prompt_artifact,
+                global_prompt_enabled=global_prompt_state is not None,
+                output_file=out,
+            )
+            client_trajectory_rows = run_orchestrator_examples(
+                args=args,
+                client=client,
+                examples=trajectory_examples,
+                split=trajectory_split,
+                role="summary_trajectory",
+                round_index=round_index,
+                orchestrator=orchestrator,
+                llm_generate=llm_generate,
+                model_path=args.model_path,
+                record=record,
+                state=state,
+                global_prompt_artifact=global_prompt_artifact,
+                global_prompt_enabled=global_prompt_state is not None,
+                output_file=out,
+            )
+            rows.extend(client_valid_rows)
             with (client_dir / "trajectories.jsonl").open("w", encoding="utf-8") as file:
-                for row in client_rows:
+                for row in client_trajectory_rows:
                     file.write(json.dumps(row["trajectory"], ensure_ascii=False) + "\n")
             report = write_client_analysis_report(
                 client_dir,
                 client,
-                client_rows,
+                client_trajectory_rows,
                 summary_generate,
             )
             prompt_manifest = write_client_prompt_artifact(
@@ -1968,11 +1929,27 @@ def run_federated_round(
                     "valid_split": valid_split,
                     "num_valid_examples": len(valid_examples),
                     "trajectory_split": trajectory_split,
-                    "num_trajectory_examples": len(examples),
-                    "valid_correct": report["correct"],
-                    "valid_accuracy": report["accuracy"],
+                    "num_trajectory_examples": len(trajectory_examples),
+                    "valid_correct": sum(row["correct"] for row in client_valid_rows),
+                    "valid_accuracy": (
+                        sum(row["correct"] for row in client_valid_rows)
+                        / len(client_valid_rows)
+                        if client_valid_rows
+                        else None
+                    ),
                     "validation": {
                         "split": valid_split,
+                        "num_examples": len(client_valid_rows),
+                        "correct": sum(row["correct"] for row in client_valid_rows),
+                        "accuracy": (
+                            sum(row["correct"] for row in client_valid_rows)
+                            / len(client_valid_rows)
+                            if client_valid_rows
+                            else None
+                        ),
+                    },
+                    "summary_trajectory": {
+                        "split": trajectory_split,
                         "num_examples": report["num_examples"],
                         "correct": report["correct"],
                         "accuracy": report["accuracy"],
@@ -1990,9 +1967,16 @@ def run_federated_round(
                     "client_id": client["id"],
                     "report_path": str(client_dir / "analysis_report.json"),
                     "summary": report["summary"],
-                    "valid_num_examples": report["num_examples"],
-                    "valid_correct": report["correct"],
-                    "valid_accuracy": report["accuracy"],
+                    "valid_num_examples": len(client_valid_rows),
+                    "valid_correct": sum(row["correct"] for row in client_valid_rows),
+                    "valid_accuracy": (
+                        sum(row["correct"] for row in client_valid_rows)
+                        / len(client_valid_rows)
+                        if client_valid_rows
+                        else None
+                    ),
+                    "summary_trajectory_num_examples": report["num_examples"],
+                    "summary_trajectory_accuracy": report["accuracy"],
                     "prompt_artifact_path": prompt_manifest["prompt_artifact_path"],
                     "trained_checkpoint_path": trained_record["checkpoint_path"],
                 }
@@ -2100,15 +2084,15 @@ def parse_args() -> argparse.Namespace:
         "--max-valid-samples-per-client",
         type=int,
         default=None,
-        help="Maximum validation examples per client for round0 validation.",
+        help="Maximum validation examples per client for round accuracy.",
     )
     parser.add_argument(
         "--max-samples-per-client",
         type=int,
-        default=3,
+        default=None,
         help=(
-            "Maximum held-out inference examples per client for trajectory "
-            "analysis in post-training rounds."
+            "Override data.max_trajectory_samples_per_client for held-out "
+            "summary trajectories in post-training rounds."
         ),
     )
     parser.add_argument("--max-new-tokens", type=int, default=64)

@@ -30,11 +30,6 @@ flwr[simulation]>=1.13
 # API backend
 openai>=1.0
 
-# Experiment tracking
-tensorboard>=2.16
-mlflow>=2.16
-wandb>=0.18
-
 # GPT-Swarm/MASRouter
 loguru
 class-registry

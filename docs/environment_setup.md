@@ -300,8 +300,6 @@ optimizer:
   local_batch_size: 16
 
 federated:
-  rounds: 10
-  clients_per_round: 6
   aggregation: fedavg
   weight_by: num_examples
 ```

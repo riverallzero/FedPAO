@@ -14,7 +14,6 @@ outputs/runs/<run-name>/
     <client_id>_<mas>_<dataset>/
       .hydra/
       checkpoints/
-      tensorboard/
       manifest.json
   round_001/
     inference.jsonl
@@ -30,7 +29,6 @@ outputs/runs/<run-name>/
       prompt_round001.pt
       prompt_manifest.json
       checkpoints/
-      tensorboard/
       manifest.json
 ```
 
@@ -56,9 +54,9 @@ Round 0에서 각 client는 `split_client_examples()`로 dataset을 섞고 train
 
 현재 `configs/fedpao_six_clients.yaml` 기준으로는 `train_fraction: 0.8`, `max_samples_per_client: 100`이므로 client별 최대 100개를 뽑고 그중 80%를 round0 train에 사용한다.
 
-Round 1 이후 trajectory 분석용 inference는 `split_client_examples_with_heldout()`를 사용한다. 이 함수는 같은 seed shuffle을 공유하지만, 먼저 train/valid pool을 만든 뒤 그 pool에 들어가지 않은 held-out index에서 summary agent용 inference 예제를 뽑는다. 따라서 summary agent가 보는 trajectory는 train과 validation에 사용된 데이터와 겹치지 않는다.
+Round 1 이후 trajectory 분석용 inference는 `split_client_examples_with_trajectory()`를 사용한다. 이 함수는 같은 seed shuffle을 공유하지만, 먼저 train/valid pool을 만든 뒤 그 pool에 들어가지 않은 held-out index에서 summary agent용 inference 예제를 뽑는다. 따라서 summary agent가 보는 trajectory는 train과 validation에 사용된 데이터와 겹치지 않는다.
 
-현재 config 기준으로는 shuffle된 앞 100개가 train/valid pool이고, `--max-samples-per-client` 기본값 3개가 그 뒤 held-out pool에서 선택된다. 이 held-out split 이름은 manifest에 `trajectory_split`, 개수는 `num_trajectory_examples`로 기록된다.
+현재 config 기준으로는 shuffle된 앞 100개가 train/valid pool이고, `data.max_trajectory_samples_per_client: 3`에 따라 그 뒤 held-out pool에서 3개가 선택된다. `--max-samples-per-client`를 넘기면 이 config 값을 실행 시점에 override한다. 이 held-out split 이름은 manifest에 `trajectory_split`, 개수는 `num_trajectory_examples`로 기록된다.
 
 ### trainer 선택
 
@@ -327,7 +325,8 @@ current round client analysis
 
 - `round0_checkpoint_path`라는 인자명은 round1 이후에도 계속 쓰이지만, 실제 의미는 "직전 round의 client checkpoint path"다.
 - `load_round0_models()`도 이름은 round0지만 `previous_manifest`의 client checkpoint를 일반적으로 로드한다.
-- `fedpao_six_clients.yaml`의 `federated.clients_per_round` 값은 현재 `run_federated_round()`에서 sampling에 사용되지 않는다. 선택된 모든 client를 매 round 순회한다.
+- 실행할 round 범위는 config가 아니라 `scripts/run.py --rounds`와 `--start-round`가 제어한다.
+- 현재 `run_federated_round()`는 별도 client sampling 없이 선택된 모든 client를 매 round 순회한다.
 - `federated.weight_by: num_examples`는 prompt manifest의 `num_examples`를 기준으로 FedAvg weight를 준다.
 - embedding-level soft prompt injection은 `causal_lm` backend만 지원한다. image-text backend에서는 현재 에러를 낸다.
 - `artifact` trainer는 실제 MAS 학습이 아니라 checkpoint 계약과 logging을 확인하기 위한 placeholder다.

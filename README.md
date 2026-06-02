@@ -11,7 +11,8 @@ Its purpose is to help heterogeneous multi-agent systems orchestrate better by l
 ## What This Framework Does
 
 - Trains or initializes client-specific MAS baseline checkpoints.
-- Runs held-out inference examples for each client in each round.
+- Runs validation split inference examples for round-level accuracy.
+- Runs a small held-out trajectory set for summary generation and prompt updates.
 - Uses a summary agent to analyze the resulting trajectories.
 - Converts analysis summaries into soft prompt latents.
 - Refines client prompts with CMA-ES.
@@ -19,6 +20,8 @@ Its purpose is to help heterogeneous multi-agent systems orchestrate better by l
 - Injects the global prompt as an embedding-level prefix in later local LLM calls.
 
 The default configuration is `configs/fedpao_six_clients.yaml`. It connects MASRouter and GPT-Swarm clients to MMLU-Pro and GSM-Hard datasets.
+
+By default, each client samples 100 examples, uses an 80/20 train-validation split for round-level validation, and reserves 3 additional held-out examples for summary trajectory analysis.
 
 ## Project Layout
 
@@ -183,8 +186,8 @@ CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run_client_inference.py --mas gp
 --orchestrator-mode              native or simulated
 --round0-trainer                 native or artifact
 --max-train-samples-per-client   Round 0 train sample limit
---max-valid-samples-per-client   Round 0 validation sample limit
---max-samples-per-client         Later-round trajectory sample limit
+--max-valid-samples-per-client   Round validation sample limit
+--max-samples-per-client         Override held-out summary trajectory sample limit
 --dtype                          auto, float16, bfloat16, float32
 ```
 
