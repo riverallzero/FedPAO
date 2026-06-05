@@ -503,9 +503,7 @@ def train_masrouter_native(
         )
         epochs = int(config.get("optimizer", {}).get("local_iterations", 5))
         batch_size = max(1, min(len(examples), int(config.get("optimizer", {}).get("local_batch_size", 1))))
-        cost_rate = 200.0 if client["dataset"] == "gsm_hard" else float(
-            config.get("objective", {}).get("call_cost_weight", 0.05)
-        )
+        cost_rate = 200.0 if client["dataset"] == "gsm_hard" else 0.05
         num_steps = 0
         for step, (epoch, batch) in enumerate(epoch_batches(examples, batch_size, epochs)):
             queries, answers, task_labels, prompt_file = masrouter_batch(client, batch)
@@ -1125,14 +1123,12 @@ def score_prompt_candidate(
 ) -> float:
     alignment = F.cosine_similarity(candidate, report_latent, dim=0).item()
     accuracy = float(report.get("accuracy") or 0.0)
-    call_cost_weight = float(objective_cfg.get("call_cost_weight", 0.0))
-    token_cost_weight = float(objective_cfg.get("token_cost_weight", 0.0))
+    latent_norm_weight = float(objective_cfg.get("latent_norm_weight", 0.0))
     norm_penalty = candidate.norm().item()
     return (
         alignment
         + accuracy
-        - call_cost_weight * norm_penalty
-        - token_cost_weight * candidate.numel()
+        - latent_norm_weight * norm_penalty
     )
 
 
@@ -1208,7 +1204,7 @@ def gradient_free_refine_prompt_latent(
             "population_size": population_size,
             "sigma0": sigma0,
             "seed": seed,
-            "objective": "maximize cosine(report_latent, candidate) + accuracy - configured cost penalties",
+            "objective": "maximize cosine(report_latent, candidate) + accuracy - latent norm penalty",
             "best_score": best_score,
             "history": history,
         }
@@ -1237,7 +1233,7 @@ def gradient_free_refine_prompt_latent(
         "population_size": population_size,
         "sigma0": sigma0,
         "seed": seed,
-        "objective": "cosine(report_latent, candidate) + accuracy - configured cost penalties",
+        "objective": "cosine(report_latent, candidate) + accuracy - latent norm penalty",
         "best_score": best_score,
         "history": history,
     }

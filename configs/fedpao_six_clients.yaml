@@ -2,7 +2,7 @@ seed: 42
 
 model:
   backend: hf_local
-  model_id: /data/Qwen3-30B-A3B-Instruct-2507
+  model_id: /data/Llama-3.1-8B-Instruct # /data/digirl/checkpoints/Qwen3-4B-Instruct/
   device: cuda
   dtype: auto
 
@@ -28,23 +28,11 @@ federated:
   weight_by: num_examples
 
 objective:
-  task_loss_weight: 1.0
-  call_cost_weight: 0.05
-  token_cost_weight: 0.001
-  latency_weight: 0.0
-  redundant_call_weight: 0.1
-  invalid_action_weight: 0.2
+  latent_norm_weight: 0.05
 
 evaluation:
   metrics:
     - accuracy
-    - exact_match
-    - avg_agent_calls
-    - avg_tool_calls
-    - avg_tokens
-    - avg_latency
-    - redundant_call_rate
-    - communication_bytes
 
 orchestrators: {}
 
