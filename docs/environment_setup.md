@@ -1,157 +1,76 @@
-# FedPAO 실험 환경 구성 문서
+# FedPAO 환경 구성 문서
 
-검증일: 2026-05-13 KST
+검토일: 2026-06-10 KST
 
-이 문서는 현재 git 디렉토리(`/data/fl_agent/Fed-PAO`)에 구성된 FedPAO 실험 환경, 데이터, 로컬 모델, 실행 스크립트, 검증 결과를 정리한 것이다. 현재 단계의 목표는 full FedPAO 학습 코드를 완성하는 것이 아니라, 단일 머신에서 6개 client 실험을 반복 실행할 수 있는 기반을 만드는 것이다.
+이 문서는 현재 코드 기준으로 FedPAO를 단일 머신에서 실행하기 위한 환경, 데이터, 모델, 스크립트 구성을 정리한다. 현재 기본 실험은 MASRouter와 GPT-Swarm 4개 client를 사용한다.
 
-## 1. 현재 상태 요약
+## 1. 현재 구현 상태
 
-현재 완료된 항목:
+현재 구현된 항목:
 
-- Python 가상환경 `.venv` 생성
-- FedPAO 기본 dependency 설치
-- PyTorch CUDA wheel 설치
-- MMLU-Pro, GSM-Hard dataset cache 구성
-- 6-client config 작성
-- 로컬 모델 경로 설정
-- 외부 MAS repo clone
-- 6개 client별 local model inference smoke test 실행
+- 4-client 기본 config: `configs/fedpao_six_clients.yaml`
+- MASRouter, GPT-Swarm simulated/native orchestrator adapter
+- round 0 native/artifact checkpoint 생성
+- round 1 이후 validation inference, trajectory 생성, summary 분석
+- summary report에서 soft prompt latent 생성
+- CMA-ES 기반 client prompt refinement
+- FedAvg 기반 server global prompt aggregation
+- causal LM backend에 embedding-level soft prompt prefix 주입
+- 완료된 run의 held-out test evaluation: `scripts/run_test.py`
+- dataset partition mode: `shared`, `client_disjoint`
 
-아직 완료하지 않은 항목:
+현재 기본 config는 같은 dataset을 쓰는 client끼리 서로 다른 shuffled subset을 쓰도록 `data.partition_mode: client_disjoint`를 사용한다.
 
-- 실제 FedPAO CMA-ES local prompt latent optimization 구현
-- FedAvg server round loop 구현
-- Puppeteer / MASRouter / GPT-Swarm adapter 실연동
-- soft prompt embedding injection 구현
-- full benchmark evaluation loop 구현
-
-## 2. 프로젝트 루트와 디렉토리 구조
-
-프로젝트 루트:
-
-```bash
-/data/fl_agent/Fed-PAO
-```
-
-주요 디렉토리:
+## 2. 프로젝트 구조
 
 ```text
-src/clients        client별 local optimization 코드 위치
-src/server         FedAvg, aggregation, round control 코드 위치
-src/orchestrators  Puppeteer, MASRouter, GPT-Swarm wrapper 위치
-src/prompts        soft prompt / latent prompt 처리 위치
-src/optimizers     CMA-ES optimizer 코드 위치
-src/evaluation     accuracy, cost, latency, redundant call metric 위치
-src/utils          공통 유틸 위치
-configs            FedPAO, client, model 설정
-data/cache         Hugging Face dataset/model cache
-outputs            inference/evaluation 결과
-logs               실행 로그
-scripts            환경 점검 및 smoke test 스크립트
-third_party        외부 MAS repo clone 위치
+configs/             FedPAO experiment configs
+docs/                환경, orchestrator, round-flow 문서
+scripts/run.py       round 0 학습과 federated round 실행
+scripts/run_test.py  저장된 round checkpoint held-out test 평가
+scripts/run_client_inference.py
+                     단일 MAS baseline inference smoke test
+src/orchestrators/   MASRouter, GPT-Swarm adapters
+third_party/         외부 MAS repositories, git ignored
+outputs/runs/        run outputs, manifests, checkpoints, artifacts
 ```
 
-Git ignore 대상:
-
-```text
-.venv/
-.env
-data/cache/
-data/raw/
-data/processed/
-outputs/
-logs/
-wandb/
-mlruns/
-third_party/
-```
+`outputs/`, `third_party/`, local cache, virtualenv는 git에 포함하지 않는다.
 
 ## 3. Python 환경
 
-가상환경:
+권장 흐름:
 
 ```bash
-/data/fl_agent/Fed-PAO/.venv
-```
-
-`python3 -m venv`는 시스템에 `python3.10-venv`가 없어 실패했고, 사용자 영역의 `virtualenv`로 `.venv`를 생성했다.
-
-활성화:
-
-```bash
-cd /data/fl_agent/Fed-PAO
+python3 -m venv .venv
 source .venv/bin/activate
+python3 -m pip install --upgrade pip setuptools wheel
 ```
 
-검증된 주요 버전:
-
-```text
-python        3.10.12
-torch         2.11.0+cu128
-torch cuda    12.8
-transformers  5.8.0
-datasets      4.8.5
-accelerate    1.13.0
-evaluate      0.4.6
-cma           4.4.4
-flwr          1.29.0
-openai        2.36.0
-mlflow        3.12.0
-wandb         0.26.1
-```
-
-Dependency consistency:
+PyTorch는 CUDA 버전에 맞는 wheel을 먼저 설치한다. 예를 들어 CUDA 12.6 wheel을 쓰는 경우:
 
 ```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+```
+
+그 뒤 FedPAO dependency를 설치한다.
+
+```bash
+pip install -r requirements.txt
+```
+
+환경 점검:
+
+```bash
+.venv/bin/python scripts/check_env.py
 .venv/bin/python -m pip check
 ```
 
-검증 결과:
+Codex sandbox 내부에서는 GPU device node가 보이지 않아 `torch.cuda.is_available()`가 `False`가 될 수 있다. 실제 GPU 검증과 긴 실험은 sandbox 밖 shell에서 실행하는 것이 안전하다.
 
-```text
-No broken requirements found.
-```
+## 4. 환경변수
 
-## 4. GPU / CUDA 상태
-
-현재 머신에는 RTX 6000 Ada Generation GPU 4개가 보인다.
-
-PyTorch CUDA 검증 결과:
-
-```text
-torch.cuda.is_available(): True
-torch.cuda.device_count(): 4
-torch.cuda.get_device_name(0): NVIDIA RTX 6000 Ada Generation
-```
-
-`nvidia-smi` 기준 GPU:
-
-```text
-0, NVIDIA RTX 6000 Ada Generation, 49140 MiB
-1, NVIDIA RTX 6000 Ada Generation, 49140 MiB
-2, NVIDIA RTX 6000 Ada Generation, 49140 MiB
-3, NVIDIA RTX 6000 Ada Generation, 49140 MiB
-```
-
-주의:
-
-Codex sandbox 내부에서는 `/dev/nvidia*` device node가 보이지 않아 `torch.cuda.is_available()`가 `False`가 될 수 있다. 실제 GPU 검증은 sandbox 밖 실행 권한으로 확인했다.
-
-## 5. 환경변수
-
-예시 파일:
-
-```bash
-.env.example
-```
-
-로컬 파일:
-
-```bash
-.env
-```
-
-현재 기본 설정:
+`.env`가 있으면 `python-dotenv`로 로드된다. 예시:
 
 ```text
 HF_HOME=./data/cache/huggingface
@@ -163,317 +82,202 @@ WANDB_MODE=offline
 MLFLOW_TRACKING_URI=./mlruns
 ```
 
-API 기반 실험을 하려면 `.env`에 다음 값을 채운다.
+현재 기본 backend는 local Hugging Face checkpoint를 사용하는 `hf_local`이다. OpenAI API key는 기본 실행에 필요하지 않다.
 
-```text
-OPENAI_API_KEY=
-OPENAI_MODEL=
-```
+## 5. 데이터
 
-현재 본 scaffold는 `hf_local` backend를 우선 사용하므로 OpenAI API key는 필수값이 아니다.
-
-## 6. Dataset 상태
-
-사용 dataset:
+기본 config가 사용하는 dataset:
 
 ```text
 TIGER-Lab/MMLU-Pro
 reasoning-machines/gsm-hard
 ```
 
-캐시 위치:
-
-```text
-data/cache/huggingface/datasets/TIGER-Lab___mmlu-pro
-data/cache/huggingface/datasets/reasoning-machines___gsm-hard
-```
-
-캐시 파일:
-
-```text
-mmlu-pro-test.arrow
-mmlu-pro-validation.arrow
-gsm-hard-train.arrow
-dataset_info.json
-```
-
-Offline mode 검증 결과:
-
-```text
-TIGER-Lab/MMLU-Pro {'test': 12032, 'validation': 70}
-reasoning-machines/gsm-hard {'train': 1319}
-```
-
-즉, 현재 두 dataset은 네트워크 없이도 로드 가능하다.
-
-Dataset smoke test:
+dataset 로드 점검:
 
 ```bash
-source .venv/bin/activate
-python scripts/check_datasets.py
+.venv/bin/python scripts/check_datasets.py
 ```
 
-## 7. 로컬 모델 설정
+기본 data 설정:
 
-로컬 checkpoint root:
-
-```bash
-/data/digirl/checkpoints
+```yaml
+data:
+  partition_mode: client_disjoint
+  train_fraction: 0.8
+  max_samples_per_client: 100
+  max_trajectory_samples_per_client: 3
 ```
 
-현재 config에 설정된 모델:
+`client_disjoint`에서는 같은 `dataset_name`을 공유하는 client들이 동일 shuffle을 기준으로 서로 겹치지 않는 구간을 받는다. 예를 들어 MMLU-Pro를 쓰는 MASRouter client와 GPT-Swarm client는 기본적으로 서로 다른 100개 예제를 사용한다. 이전처럼 같은 subset으로 비교하려면 config를 `shared`로 바꾸거나 실행 시 `--data-partition-mode shared`를 넘긴다.
 
-```bash
-/data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
-```
+## 6. 로컬 모델
 
-이 모델을 선택한 이유:
-
-- `/data/digirl/checkpoints` 안에서 비교적 작은 로컬 모델이다.
-- 현재 설치된 `transformers`로 `AutoModelForImageTextToText` 로딩이 가능했다.
-- MMLU-Pro / GSM-Hard는 텍스트 task이므로 이미지 입력 없이 text prompt로 smoke test가 가능했다.
-
-간단 로딩 검증:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python - <<'PY'
-import torch
-from transformers import AutoProcessor, AutoModelForImageTextToText
-
-path = "/data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf"
-processor = AutoProcessor.from_pretrained(path, local_files_only=True)
-model = AutoModelForImageTextToText.from_pretrained(
-    path,
-    local_files_only=True,
-    dtype=torch.float16,
-    device_map="auto",
-).eval()
-
-print(type(processor).__name__)
-print(type(model).__name__)
-PY
-```
-
-다른 checkpoint 후보는 많지만, 아직 FedPAO config에는 연결하지 않았다. 예:
-
-```text
-Qwen3.5-2B
-Qwen3.5-2B-Base
-Qwen2-VL-2B-Instruct
-Qwen2-VL-7B-Instruct
-llava-1.5-7b
-llava-1.6-7b
-InternVL3_5-1B
-InternVL3_5-8B
-Ovis2-1B
-Phi-4-multimodal-instruct
-```
-
-## 8. 6-Client FedPAO Config
-
-설정 파일:
-
-```bash
-configs/fedpao_six_clients.yaml
-```
-
-핵심 설정:
+기본 모델 경로는 config의 `model.model_id`에서 읽는다.
 
 ```yaml
 model:
   backend: hf_local
-  model_id: /data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
+  model_id: /data/digirl/checkpoints/Qwen3-4B-Instruct/
   device: cuda
   dtype: auto
+```
 
+실행 시 다른 checkpoint를 쓰려면 `--model-path`를 넘긴다.
+
+```bash
+.venv/bin/python scripts/run.py \
+  --model-path /path/to/local/hf/checkpoint \
+  --start-round 0 \
+  --rounds 4
+```
+
+`scripts/run_client_inference.py`와 `scripts/run_test.py`도 같은 방식으로 `--model-path`를 받는다.
+
+## 7. 기본 Config
+
+현재 `configs/fedpao_six_clients.yaml`의 client 구성:
+
+```text
+c1: masrouter + MMLU-Pro
+c2: masrouter + GSM-Hard
+c3: gptswarm  + MMLU-Pro
+c4: gptswarm  + GSM-Hard
+```
+
+주요 학습/최적화 설정:
+
+```yaml
 prompt:
   type: soft_latent
-  latent_dim: 32
-  intrinsic_dim: 32
+  latent_dim: 64
   init_std: 0.02
 
 optimizer:
   name: cma_es
   sigma0: 0.5
-  population_size: 8
-  local_iterations: 5
+  population_size: 5
+  local_iterations: 10
   local_batch_size: 16
 
 federated:
-  rounds: 10
-  clients_per_round: 6
   aggregation: fedavg
   weight_by: num_examples
+
+objective:
+  cost_weight: 0.0
+  latency_weight: 0.0
+  latent_norm_weight: 0.05
 ```
 
-Client 구성:
-
-```text
-c1: puppeteer + MMLU-Pro
-c2: puppeteer + GSM-Hard
-c3: masrouter  + MMLU-Pro
-c4: masrouter  + GSM-Hard
-c5: gptswarm   + MMLU-Pro
-c6: gptswarm   + GSM-Hard
-```
-
-Config 검증:
+Config 확인:
 
 ```bash
-python - <<'PY'
+.venv/bin/python - <<'PY'
 import yaml
 
-with open("configs/fedpao_six_clients.yaml") as f:
+with open("configs/fedpao_six_clients.yaml", encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
 
 print("num clients:", len(cfg["clients"]))
 print([client["id"] for client in cfg["clients"]])
+print([client["mas"] for client in cfg["clients"]])
 PY
 ```
 
-예상 출력:
+## 8. 외부 MAS Repo
 
-```text
-num clients: 6
-['c1', 'c2', 'c3', 'c4', 'c5', 'c6']
-```
-
-## 9. 외부 MAS Repo
-
-외부 repo는 clone만 했고, 현재 `.venv`에 설치하지 않았다.
-
-```text
-third_party/GPTSwarm
-third_party/masrouter
-third_party/ChatDev-puppeteer
-```
-
-설치하지 않은 이유:
-
-- 각 MAS repo가 요구하는 `torch`, `transformers`, `openai`, `numpy` 버전이 현재 FedPAO 환경과 충돌할 수 있다.
-- 특히 ChatDev Puppeteer requirements는 `torch==2.4.0`, `transformers==4.43.4` 등 고정 버전을 요구한다.
-- 초기 단계에서는 FedPAO wrapper interface를 먼저 만들고, 각 MAS는 adapter로 하나씩 연결하는 편이 안전하다.
-
-권장 연결 순서:
-
-```text
-1. FedPAO mock/raw orchestrator
-2. GPTSwarm wrapper
-3. MASRouter wrapper
-4. Puppeteer wrapper
-```
-
-## 10. 현재 실행 가능한 스크립트
-
-환경 점검:
+외부 repo는 `third_party/` 아래에 둔다.
 
 ```bash
-python scripts/check_env.py
+mkdir -p third_party
+
+git clone --depth 1 \
+  https://github.com/yanweiyue/masrouter.git \
+  third_party/masrouter
+
+git clone --depth 1 \
+  https://github.com/metauto-ai/GPTSwarm.git \
+  third_party/GPTSwarm
 ```
 
-Dataset 점검:
+상태 점검:
 
 ```bash
-python scripts/check_datasets.py
+.venv/bin/python scripts/check_orchestrators.py
+.venv/bin/python scripts/check_orchestrators.py --json
 ```
 
-6-client local inference smoke test:
+현재 registry에 등록된 orchestrator는 `masrouter`, `gptswarm`이다.
+
+## 9. 실행 가능한 스크립트
+
+Round flow 실행:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/run_client_inference.py \
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run.py \
+  --start-round 0 \
+  --rounds 4
+```
+
+Artifact-only smoke test:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run.py \
+  --round0-trainer artifact \
   --max-samples-per-client 1 \
-  --max-new-tokens 64
+  --start-round 0 \
+  --rounds 1
 ```
 
-기본 출력:
+Standalone baseline inference:
 
 ```bash
-outputs/client_inference_smoke.jsonl
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run_client_inference.py --mas masrouter
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run_client_inference.py --mas gptswarm
 ```
 
-## 11. Local Inference Smoke Test 결과
-
-실행한 명령:
+Held-out test evaluation:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/run_client_inference.py \
-  --max-samples-per-client 1 \
-  --max-new-tokens 64 \
-  --dtype float16
+python3 scripts/run_test.py --run-root outputs/runs/<run-name> --rounds 0 1 2 3
+
+python3 scripts/run_test.py \
+  --run-root outputs/runs/<run-name> \
+  --test-samples-per-client 20
 ```
 
-결과 요약:
+## 10. 주요 출력
+
+Round run은 기본적으로 `outputs/runs/<run-name>/` 아래에 저장된다.
 
 ```text
-c1 puppeteer mmlu_pro: pred='B' gt='A' correct=False
-c2 puppeteer gsm_hard: pred='1' gt='-9867630.0' correct=False
-c3 masrouter mmlu_pro: pred='B' gt='A' correct=False
-c4 masrouter gsm_hard: free-form wrong response
-c5 gptswarm mmlu_pro: pred='B' gt='A' correct=False
-c6 gptswarm gsm_hard: pred='1' gt='-9867630.0' correct=False
-accuracy: 0/6
+outputs/runs/<run-name>/
+  config.yaml
+  manifest.json
+  round_000/
+    manifest.json
+  round_001/
+    inference.jsonl
+    analysis_manifest.json
+    manifest.json
+    server/
+      global_prompt_manifest.json
+      global_prompt_round002.pt
 ```
 
-해석:
-
-- 이 결과는 모델 성능 평가가 아니라 local model inference pipeline smoke test다.
-- 현재는 실제 Puppeteer / MASRouter / GPT-Swarm reasoning loop가 붙지 않았다.
-- 각 client는 동일 로컬 모델을 raw text prompt로 호출한다.
-- GSM-Hard 첫 예시는 의도적으로 큰 숫자를 포함한 hard sample이며, 작은 0.5B급 VLM에는 어려울 수 있다.
-
-## 12. 학습을 해야 하는가?
-
-지금 단계에서 LLM 자체 fine-tuning은 하지 않는 것이 맞다.
-
-프로포절 기준 FedPAO의 핵심 설정은 다음이다.
+`scripts/run_test.py`는 기본적으로 `<run-root>/test/` 아래에 아래 파일을 만든다.
 
 ```text
-LLM parameters: frozen
-gradient access: not used
-optimization: CMA-ES
-optimized variable: low-dimensional prompt latent z
-aggregation: FedAvg-style aggregation over client prompt latents
+test_inference.jsonl
+test_manifest.json
+test_sets/
+  <client>_<mas>_<dataset>.jsonl
 ```
 
-따라서 여기서 말하는 “학습”은 일반적인 model fine-tuning이 아니라 다음 단계다.
+## 11. Caveats
 
-```text
-1. 각 client가 frozen local LLM을 호출한다.
-2. CMA-ES가 client별 prompt latent 후보를 생성한다.
-3. 후보 prompt latent의 score를 benchmark metric으로 평가한다.
-4. local best latent를 server로 보낸다.
-5. server가 FedAvg로 global latent를 aggregate한다.
-6. 다음 federated round에 global latent를 broadcast한다.
-```
-
-즉, 현재 환경에서는 먼저 inference가 동작하는지 확인했고, 다음 구현 대상은 CMA-ES local optimizer와 FedAvg round loop다.
-
-## 13. 다음 구현 순서
-
-권장 순서:
-
-```text
-1. Dataset loader module
-2. Trajectory schema
-3. Mock orchestrator interface
-4. Accuracy / exact match evaluator
-5. Local prompt latent representation
-6. CMA-ES local optimizer
-7. FedAvg server aggregation
-8. 6-client dry run
-9. GPTSwarm wrapper
-10. MASRouter wrapper
-11. Puppeteer wrapper
-12. cost / latency / redundant call metric
-13. full FedPAO experiment
-```
-
-## 14. Known Caveats
-
-- `outputs/`, `data/cache/`, `third_party/`는 git ignore 대상이다.
-- 현재 inference 결과 파일은 재현용 artifact이며 git에는 포함하지 않는다.
-- Codex sandbox 내부에서는 CUDA device node가 보이지 않을 수 있으므로 GPU 검증은 sandbox 밖 실행으로 해야 한다.
-- 외부 MAS repo는 clone되어 있지만 설치하지 않았다.
-- 현재 local inference는 adapter 없는 raw/mock prompt 방식이다.
-- `soft_latent` 설정은 config에 있지만 실제 embedding-level soft prompt injection은 아직 구현되지 않았다.
-- API backend는 설정만 존재하고 smoke test는 수행하지 않았다.
+- `artifact` trainer는 실제 MAS 학습이 아니라 checkpoint/artifact 계약 확인용이다.
+- embedding-level soft prompt injection은 causal LM backend에서만 지원한다.
+- native mode는 외부 repo dependency와 runtime behavior의 영향을 받는다.
+- `run_client_inference.py`는 adapter 내부 예외를 error row로 변환하지 않고 실행을 중단한다.

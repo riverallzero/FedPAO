@@ -16,6 +16,8 @@ matplotlib>=3.8
 transformers>=4.45
 datasets>=3.0
 accelerate>=0.34
+bitsandbytes>=0.43
+llama-cpp-python>=0.2.90
 evaluate>=0.4
 sentencepiece>=0.2
 safetensors>=0.4
@@ -28,7 +30,19 @@ flwr[simulation]>=1.13
 # API backend
 openai>=1.0
 
-# Experiment tracking
-mlflow>=2.16
-wandb>=0.18
-
+# GPT-Swarm/MASRouter
+loguru
+class-registry
+shortuuid
+groq
+sentence-transformers
+tiktoken
+astunparse
+langchain-community
+python-docx
+markdown
+PyPDF2
+openpyxl
+pylatexenc
+google-api-python-client
+wikipedia

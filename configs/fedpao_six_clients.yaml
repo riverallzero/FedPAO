@@ -2,75 +2,60 @@ seed: 42
 
 model:
   backend: hf_local
-  model_id: /data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf
+  model_id: /data/digirl/checkpoints/Qwen3-4B-Instruct/ # /data/Llama-3.1-8B-Instruct
   device: cuda
   dtype: auto
 
 prompt:
   type: soft_latent
-  latent_dim: 32
-  intrinsic_dim: 32
+  latent_dim: 64
   init_std: 0.02
+
+data:
+  partition_mode: client_disjoint # shared
+  train_fraction: 0.8
+  max_samples_per_client: 100
+  max_trajectory_samples_per_client: 3
 
 optimizer:
   name: cma_es
   sigma0: 0.5
-  population_size: 8
-  local_iterations: 5
+  population_size: 5
+  local_iterations: 10
   local_batch_size: 16
 
 federated:
-  rounds: 10
-  clients_per_round: 6
   aggregation: fedavg
   weight_by: num_examples
 
 objective:
-  task_loss_weight: 1.0
-  call_cost_weight: 0.05
-  token_cost_weight: 0.001
+  cost_weight: 0.0
   latency_weight: 0.0
-  redundant_call_weight: 0.1
-  invalid_action_weight: 0.2
+  latent_norm_weight: 0.05
 
 evaluation:
   metrics:
     - accuracy
-    - exact_match
-    - avg_agent_calls
-    - avg_tool_calls
-    - avg_tokens
-    - avg_latency
-    - redundant_call_rate
-    - communication_bytes
+
+orchestrators: {}
 
 clients:
   - id: c1
-    mas: puppeteer
+    mas: masrouter
     dataset: mmlu_pro
     dataset_name: TIGER-Lab/MMLU-Pro
 
   - id: c2
-    mas: puppeteer
+    mas: masrouter
     dataset: gsm_hard
     dataset_name: reasoning-machines/gsm-hard
 
   - id: c3
-    mas: masrouter
-    dataset: mmlu_pro
-    dataset_name: TIGER-Lab/MMLU-Pro
-
-  - id: c4
-    mas: masrouter
-    dataset: gsm_hard
-    dataset_name: reasoning-machines/gsm-hard
-
-  - id: c5
     mas: gptswarm
     dataset: mmlu_pro
     dataset_name: TIGER-Lab/MMLU-Pro
 
-  - id: c6
+  - id: c4
     mas: gptswarm
     dataset: gsm_hard
     dataset_name: reasoning-machines/gsm-hard

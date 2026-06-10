@@ -1,74 +1,240 @@
-# Fed-PAO
+# FedPAO
 
-Single-machine scaffold for the initial FedPAO experiments:
+FedPAO is a framework for experiments on **Federated Black-box Prompt Learning for Agentic Orchestrators**.
 
-- black-box/frozen LLM backend
-- CMA-ES local prompt latent optimization
-- FedAvg-style federated aggregation
-- 6 simulated clients: Puppeteer, MASRouter, GPT-Swarm crossed with MMLU-Pro and GSM-Hard
+<p align="center">
+  <img width="60%" alt="overview" src="assets/overview.png"/>
+</p>
 
-See [docs/environment_setup.md](docs/environment_setup.md) for the verified local environment, dataset cache, model path, and smoke test status.
+Its purpose is to help heterogeneous multi-agent systems orchestrate better by learning from the orchestration behavior observed across different MAS configurations. Each client may use a different orchestrator, dataset, routing policy, or agent composition. FedPAO collects the resulting orchestration traces, summarizes what worked or failed, converts those observations into client-level soft prompt latents, and federates them into a shared global prompt. Later rounds reuse that global prompt so each MAS can make better orchestration decisions without directly fine-tuning the underlying LLM.
 
-## Environment
+## What This Framework Does
+
+- Trains or initializes client-specific MAS baseline checkpoints.
+- Runs validation split inference examples for round-level accuracy.
+- Runs a small held-out trajectory set for summary generation and prompt updates.
+- Uses a summary agent to analyze the resulting trajectories.
+- Converts analysis summaries into soft prompt latents.
+- Refines client prompts with CMA-ES.
+- Aggregates client prompts with FedAvg into a server global prompt.
+- Injects the global prompt as an embedding-level prefix in later local LLM calls.
+
+The default configuration is `configs/fedpao_six_clients.yaml`. It connects MASRouter and GPT-Swarm clients to MMLU-Pro and GSM-Hard datasets.
+
+By default, each client samples 100 examples, uses an 80/20 train-validation split for round-level validation, and reserves 3 additional held-out examples for summary trajectory analysis. The default `data.partition_mode: client_disjoint` gives clients that use the same dataset non-overlapping shuffled subsets, so MMLU-Pro clients do not all train and evaluate on the same 100 rows. Set `data.partition_mode: shared` or pass `--data-partition-mode shared` to reproduce the older shared-data behavior.
+
+## Project Layout
+
+```text
+configs/             FedPAO experiment configs
+docs/                Environment notes and round-flow documentation
+scripts/run.py       Round 0 training and federated round runner
+scripts/run_client_inference.py
+                     Standalone MAS baseline inference smoke test
+src/orchestrators/   MASRouter and GPT-Swarm wrappers/native adapters
+third_party/         External MAS repositories, git ignored
+outputs/runs/        Run outputs, manifests, checkpoints, and artifacts
+```
+
+## Environment Setup
+
+### 1. Create a Python virtual environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
+python3 -m pip install --upgrade pip setuptools wheel
 ```
 
-Install PyTorch first using the wheel appropriate for the machine.
+### 2. Install PyTorch
+
+Install PyTorch first, using the wheel that matches your CUDA version. For example, for the CUDA 12.6 wheel:
 
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Then install the FedPAO dependencies:
+If your machine uses a different CUDA/PyTorch combination, choose the appropriate command from the [PyTorch installation guide](https://pytorch.org/get-started/locally/).
+
+### 3. Install FedPAO dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create local environment variables:
+### 4. Clone external MAS repositories
+
+FedPAO expects external MAS implementations to live under `third_party/`. This directory is intentionally excluded from git.
 
 ```bash
-cp .env.example .env
-set -a
-source .env
-set +a
+mkdir -p third_party
+
+git clone --depth 1 \
+  https://github.com/yanweiyue/masrouter.git \
+  third_party/masrouter
+
+git clone --depth 1 \
+  https://github.com/metauto-ai/GPTSwarm.git \
+  third_party/GPTSwarm
 ```
 
-## Smoke Tests
+### 5. Configure the local model path
 
-```bash
-python scripts/check_env.py
-python scripts/check_datasets.py
+The default local model path is defined in `configs/fedpao_six_clients.yaml` under `model.model_id`.
+
+```yaml
+model:
+  backend: hf_local
+  model_id: /data/digirl/checkpoints/Qwen3-4B-Instruct/
 ```
 
-Validate the 6-client config:
+To use a different local Hugging Face checkpoint, either edit the config or pass `--model-path` at runtime.
 
 ```bash
-python - <<'PY'
-import yaml
-
-with open("configs/fedpao_six_clients.yaml") as f:
-    cfg = yaml.safe_load(f)
-
-print("num clients:", len(cfg["clients"]))
-print([client["id"] for client in cfg["clients"]])
-PY
+.venv/bin/python scripts/run.py \
+  --model-path /path/to/local/hf/checkpoint \
+  --start-round 0 \
+  --rounds 4
 ```
 
-Run one local-model inference sample for each configured client:
+## Running FedPAO
+
+### Run the full round loop
+
+Start from round 0, then run federated rounds 1 through 4:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/run_client_inference.py \
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run.py \
+  --start-round 0 \
+  --rounds 4
+```
+
+By default, outputs are written under `outputs/runs/<run-name>/`. Each round stores its own manifest, client checkpoints, trajectories, analysis reports, and prompt artifacts.
+
+```text
+outputs/runs/<run-name>/
+  config.yaml
+  manifest.json
+  round_000/
+    manifest.json
+  round_001/
+    inference.jsonl
+    analysis_manifest.json
+    manifest.json
+    server/
+      global_prompt_manifest.json
+      global_prompt_round002.pt
+```
+
+### Run a quick smoke test
+
+To check the round flow and artifact contract without running the external MAS native trainers, use `--round0-trainer artifact`.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run.py \
+  --round0-trainer artifact \
   --max-samples-per-client 1 \
-  --max-new-tokens 64
+  --start-round 0 \
+  --rounds 1
 ```
 
-## Notes
+### Run only one MAS baseline
 
-- Keep external MAS repositories under `third_party/`; they are intentionally git-ignored.
-- Start with mock orchestrators before installing GPT-Swarm, MASRouter, and Puppeteer dependencies into this environment.
-- Replace `model.model_id` in `configs/fedpao_six_clients.yaml` before running local LLM experiments.
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run.py \
+  --mas masrouter \
+  --start-round 0 \
+  --rounds 2
+```
+
+Currently supported values are `masrouter` and `gptswarm`.
+
+### Resume an existing run
+
+To resume from round 1 after an existing run has already produced `round_000`:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run.py \
+  --run-root outputs/runs/<run-name> \
+  --start-round 1 \
+  --rounds 4
+```
+
+With `--start-round N`, the runner loads the manifest from `round_(N-1)` and continues from there.
+
+### Run held-out test inference
+
+Use `scripts/run_test.py` to evaluate a completed run on held-out test examples.
+
+```bash
+python3 scripts/run_test.py --run-root outputs/runs/<run-name> --rounds 0 1 2 3
+```
+
+To override the number of held-out test examples per client:
+
+```bash
+python3 scripts/run_test.py \
+  --run-root outputs/runs/<run-name> \
+  --test-samples-per-client 20
+```
+
+### Run standalone baseline inference
+
+Use `scripts/run_client_inference.py` when you only want to test an individual MAS wrapper instead of the full round runner.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run_client_inference.py --mas masrouter
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run_client_inference.py --mas gptswarm
+```
+
+## Important Options
+
+```text
+--config                         YAML config to load
+--run-name                       Name for a new run
+--run-root                       Existing or new run directory
+--output-dir                     Run output root, default outputs/runs
+--model-path                     Local Hugging Face checkpoint path
+--third-party-dir                External MAS repository root, default third_party
+--mas                            MAS names to run
+--start-round                    First round to execute, default 0
+--rounds                         Last post-training round to execute
+--orchestrator-mode              native or simulated
+--round0-trainer                 native or artifact
+--max-train-samples-per-client   Round 0 train sample limit
+--max-valid-samples-per-client   Round validation sample limit
+--max-samples-per-client         Override held-out summary trajectory sample limit
+--data-partition-mode            shared or client_disjoint
+--dtype                          auto, float16, bfloat16, float32
+```
+
+See the full CLI help with:
+
+```bash
+.venv/bin/python scripts/run.py --help
+```
+
+## Additional Documentation
+
+- `docs/environment_setup.md`: Environment and dependency setup notes
+- `docs/orchestrator_setup.md`: MASRouter and GPT-Swarm adapter notes
+- `docs/run_round_training_flow.md`: Round-by-round execution flow for `scripts/run.py`
+
+## Results
+Experimental setting:
+
+- LLM: local `Qwen3-4B-Instruct` at `/data/digirl/checkpoints/Qwen3-4B-Instruct/`
+- Clients: MASRouter and GPT-Swarm on MMLU-Pro and GSM-Hard (`c1`-`c4`)
+- Data: `client_disjoint` partitioning; each client uses 100 examples split into 80 train / 20 validation examples, plus 3 held-out trajectory examples for summary analysis.
+- Test: 20 held-out test examples per client, excluding train/validation/trajectory examples.
+- Training schedule: round 0 is the MAS baseline checkpoint; rounds 1-4 perform federated prompt learning with client prompt refinement and FedAvg global prompt aggregation.
+
+After 4 federated learning rounds, total test accuracy improves from `0.2250` at round 0 to `0.2875` at round 4, a relative gain of **27.78%** (`+6.25` percentage points).
+
+| Round | C1 (MASRouter-MMLU) | C2 (MASRouter-GSM) | C3 (GPTSwarm-MMLU) | C4 (GPTSwarm-GSM) | Total |
+|:-----:|:-------------------:|:------------------:|:------------------:|:-----------------:|:----:|
+| 0 | 0.4500 | 0.1500 | 0.2000 | 0.1000 | 0.2250 |
+| 1 | **0.5000** | 0.2500 | **0.2500** | **0.1500** | **0.2875** |
+| 2 | **0.5000** | 0.2500 | 0.1500 | 0.1000 | 0.2500 |
+| 3 | 0.4500 | 0.2500 | 0.1500 | 0.0000 | 0.2125 |
+| 4 | 0.4000 | **0.5000** | 0.1500 | 0.1000 | **0.2875** |
