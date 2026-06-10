@@ -54,6 +54,13 @@ Round 0에서 각 client는 `split_client_examples()`로 dataset을 섞고 train
 
 현재 `configs/fedpao_six_clients.yaml` 기준으로는 `train_fraction: 0.8`, `max_samples_per_client: 100`이므로 client별 최대 100개를 뽑고 그중 80%를 round0 train에 사용한다.
 
+`data.partition_mode`는 dataset을 공유하는 client 사이의 sample overlap을 제어한다.
+
+- `client_disjoint`: 현재 기본값이다. 같은 `dataset_name`을 공유하는 client들이 동일 shuffle을 기준으로 서로 겹치지 않는 구간을 받는다.
+- `shared`: 이전 동작이다. 같은 dataset을 쓰는 client들이 같은 shuffled prefix를 사용한다.
+
+실행 시 `--data-partition-mode shared` 또는 `--data-partition-mode client_disjoint`로 config 값을 override할 수 있다. 각 JSONL row와 manifest에는 `partition_mode`, `partition_key`, `partition_rank`, `partition_peers` metadata가 기록된다.
+
 Round 1 이후 trajectory 분석용 inference는 `split_client_examples_with_trajectory()`를 사용한다. 이 함수는 같은 seed shuffle을 공유하지만, 먼저 train/valid pool을 만든 뒤 그 pool에 들어가지 않은 held-out index에서 summary agent용 inference 예제를 뽑는다. 따라서 summary agent가 보는 trajectory는 train과 validation에 사용된 데이터와 겹치지 않는다.
 
 현재 config 기준으로는 shuffle된 앞 100개가 train/valid pool이고, `data.max_trajectory_samples_per_client: 3`에 따라 그 뒤 held-out pool에서 3개가 선택된다. `--max-samples-per-client`를 넘기면 이 config 값을 실행 시점에 override한다. 이 held-out split 이름은 manifest에 `trajectory_split`, 개수는 `num_trajectory_examples`로 기록된다.
@@ -142,11 +149,6 @@ Round 2부터는 직전 round manifest의 `global_prompt.global_prompt_artifact_
 
 MAS별 native orchestrator는 이 경로를 다음처럼 사용한다.
 
-- Puppeteer
-  - policy config에 `training: false`, `loading: true`를 설정한다.
-  - `paths.model_path`에 checkpoint path를 넣는다.
-  - inference 중에는 save를 비활성화한다.
-
 - GPT-Swarm
   - checkpoint의 `connection_dist_state_dict`를 `swarm.connection_dist`에 로드한다.
   - edge probability가 0.5보다 큰 edge mask로 graph를 realize한다.
@@ -184,7 +186,8 @@ client별 inference가 끝나면 `write_client_analysis_report()`가 실행된�
    - `optimizer.name`이 `cma_es`, `cma-es`, `cma` 중 하나이면 `cma.CMAEvolutionStrategy`를 사용한다.
    - 시작점은 report summary에서 만든 `report_latent`다.
    - CMA-ES는 매 iteration마다 `population_size`개 후보 latent를 `ask()`로 생성한다.
-   - 각 후보는 `score = cosine(report_latent, candidate) + accuracy - cost penalties`로 평가된다.
+   - 각 후보는 client validation subset에 soft prompt로 주입되어 실제 inference reward로 평가된다.
+   - 기본 score는 `validation_accuracy - latent_norm_weight * ||candidate||`이며, config에서 `cost_weight`와 `latency_weight`를 주면 평균 routing cost와 latency도 penalty로 반영된다.
    - `cma` 라이브러리는 minimize API이므로 코드에서는 `loss = -score`를 `tell()`에 넘긴다.
    - `tell()` 이후 CMA-ES 내부의 평균과 공분산이 업데이트되고, 다음 generation 후보 분포가 바뀐다.
    - 가장 점수가 좋은 latent를 client soft prompt로 선택한다.
@@ -212,7 +215,7 @@ prompt:
 optimizer:
   name: cma_es
   sigma0: 0.5
-  population_size: 12
+  population_size: 5
   local_iterations: 10
 ```
 
@@ -221,12 +224,6 @@ optimizer:
   - report embedding은 이 차원으로 random projection된다.
   - client prompt와 server global prompt의 `soft_prompt` 크기도 이 값에 의해 결정된다.
   - 차원이 커질수록 표현력은 늘지만 CMA-ES 탐색 비용과 필요한 population이 증가한다.
-
-- `intrinsic_dim`
-  - 현재 `configs/fedpao_six_clients.yaml`에는 설정되어 있지 않다.
-  - 현재 `scripts/run.py`에서도 사용되지 않는다.
-  - 일반적으로는 CMA-ES가 탐색하는 더 낮은 intrinsic vector 차원과 실제 prompt latent 차원을 분리할 때 쓰는 이름이다.
-  - 현재 구현은 `CMA-ES candidate dimension == latent_dim` 구조이므로 `intrinsic_dim`은 문서적 placeholder에 가깝다.
 
 - `init_std`
   - report latent와 soft prompt scale을 작게 유지하는 값이다.
@@ -244,9 +241,9 @@ optimizer:
 - `local_iterations`
   - CMA-ES generation 수다.
   - 총 후보 평가는 대략 `population_size * local_iterations`개다.
-  - `population_size: 12`, `local_iterations: 10`이면 client별 120개 후보를 proxy objective로 평가한다.
+  - `population_size: 5`, `local_iterations: 10`이면 client별 50개 후보를 validation inference reward로 평가한다.
 
-현재 CMA-ES objective는 후보마다 실제 MAS inference를 다시 돌리는 비싼 objective가 아니라, summary report latent와 candidate latent의 alignment 및 cost penalty를 보는 proxy objective다. 따라서 round loop 안에서도 비교적 낮은 비용으로 client별 prompt latent를 조정할 수 있다.
+현재 CMA-ES objective는 후보마다 client validation subset에서 실제 MAS inference를 다시 돌리는 성능 기반 objective다. 따라서 기존 proxy objective보다 연구 설정에는 더 자연스럽지만, 비용은 `population_size * local_iterations * validation_examples`에 비례한다.
 
 ### 6. prompt를 주입한 client 재학습
 
@@ -254,7 +251,7 @@ optimizer:
 
 여기서 중요한 차이는 `llm_generate`가 일반 generate가 아니라 `generate_with_embedding_soft_prompt()`라는 점이다. 즉 third_party MAS trainer는 기존 round0과 같은 native training loop를 돌지만, trainer 내부에서 LLM을 호출할 때는 client analysis로부터 만든 soft prompt embedding이 모든 prompt 앞에 붙는다.
 
-`--round0-trainer native`이면 다시 `train_client_native()`를 호출한다. 그래서 round1 이후에도 Puppeteer, GPT-Swarm, MASRouter 각각의 native train loop가 실행되고, 새 checkpoint가 client directory의 `checkpoints/` 아래에 저장된다.
+`--round0-trainer native`이면 다시 `train_client_native()`를 호출한다. 그래서 round1 이후에도 GPT-Swarm, MASRouter 각각의 native train loop가 실행되고, 새 checkpoint가 client directory의 `checkpoints/` 아래에 저장된다.
 
 이 새 checkpoint path는 client manifest에 기록되고, 다음 round의 `previous_manifest`로 사용된다.
 
@@ -325,11 +322,49 @@ current round client analysis
 
 - `round0_checkpoint_path`라는 인자명은 round1 이후에도 계속 쓰이지만, 실제 의미는 "직전 round의 client checkpoint path"다.
 - `load_round0_models()`도 이름은 round0지만 `previous_manifest`의 client checkpoint를 일반적으로 로드한다.
-- 실행할 round 범위는 config가 아니라 `scripts/run.py --rounds`와 `--start-round`가 제어한다.
+- 실행할 round 범위는 config가 아니라 `scripts/run.py --rounds`와 `--start-round`가 제어한다. `--rounds`는 실행할 마지막 post-training round 번호처럼 동작한다. 예를 들어 `--start-round 0 --rounds 4`는 round0부터 round4까지 만든다.
 - 현재 `run_federated_round()`는 별도 client sampling 없이 선택된 모든 client를 매 round 순회한다.
 - `federated.weight_by: num_examples`는 prompt manifest의 `num_examples`를 기준으로 FedAvg weight를 준다.
 - embedding-level soft prompt injection은 `causal_lm` backend만 지원한다. image-text backend에서는 현재 에러를 낸다.
 - `artifact` trainer는 실제 MAS 학습이 아니라 checkpoint 계약과 logging을 확인하기 위한 placeholder다.
+
+## Held-out Test 평가
+
+`scripts/run_test.py`는 완료된 run directory의 round manifest를 읽고, train/validation/trajectory에 쓰이지 않은 held-out example으로 각 round checkpoint를 평가한다.
+
+기본 동작:
+
+```text
+run_root/config.yaml 로드
+  -> 평가할 round manifest discovery 또는 --rounds 사용
+  -> dataset별 train/validation/trajectory index 제외
+  -> client별 held-out test set 저장
+  -> round별 checkpoint_path 로드
+  -> manifest의 global prompt가 있으면 embedding soft prompt 주입
+  -> test_inference.jsonl과 test_manifest.json 저장
+```
+
+실행 예시:
+
+```bash
+python3 scripts/run_test.py --run-root outputs/runs/<run-name> --rounds 0 1 2 3
+
+python3 scripts/run_test.py \
+  --run-root outputs/runs/<run-name> \
+  --test-samples-per-client 20
+```
+
+기본 출력 위치:
+
+```text
+outputs/runs/<run-name>/test/
+  test_inference.jsonl
+  test_manifest.json
+  test_sets/
+    <client>_<mas>_<dataset>.jsonl
+```
+
+`--prompt-mode manifest`가 기본값이다. 이 모드에서는 round manifest에 `global_prompt.global_prompt_artifact_path`가 있으면 해당 prompt를 주입한다. checkpoint만 prompt 없이 비교하려면 `--prompt-mode none`을 사용한다.
 
 ## 간단 실행 예시
 
@@ -337,6 +372,6 @@ Round0 후 round4까지 실행:
 
 ```bash
 CUDA_VISIBLE_DEVICES=3 .venv/bin/python scripts/run.py \
-  --start-round 0 \                  
+  --start-round 0 \
   --rounds 4
 ```

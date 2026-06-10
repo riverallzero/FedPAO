@@ -22,6 +22,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.orchestrators import create_orchestrator
+from scripts.data_partitioning import (
+    client_partition_indices,
+    client_partition_metadata,
+    partition_mode,
+)
 
 
 DEFAULT_MODEL_PATH = "/data/digirl/checkpoints/llava-onevision-qwen2-0.5b-ov-hf"
@@ -175,6 +180,15 @@ def main() -> None:
         default="native",
         help="native runs the cloned baseline framework; simulated only wraps the prompt.",
     )
+    parser.add_argument(
+        "--data-partition-mode",
+        choices=["shared", "client_disjoint"],
+        default=None,
+        help=(
+            "Override data.partition_mode. shared keeps the old behavior; "
+            "client_disjoint gives clients with the same dataset non-overlapping subsets."
+        ),
+    )
     parser.add_argument("--max-samples-per-client", type=int, default=1)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument(
@@ -188,6 +202,8 @@ def main() -> None:
 
     with open(args.config) as file:
         config = yaml.safe_load(file)
+    if args.data_partition_mode is not None:
+        config.setdefault("data", {})["partition_mode"] = args.data_partition_mode
 
     if args.model_path is None:
         args.model_path = config.get("model", {}).get("model_id", DEFAULT_MODEL_PATH)
@@ -208,6 +224,8 @@ def main() -> None:
         if not clients:
             raise ValueError(f"No clients matched --mas {args.mas}")
 
+        data_cfg = config.get("data", {})
+        data_partition_mode = partition_mode(data_cfg)
         for client in clients:
             orchestrator = create_orchestrator(
                 client["mas"],
@@ -216,9 +234,15 @@ def main() -> None:
             )
             dataset = load_dataset(client["dataset_name"])
             split = "validation" if "validation" in dataset else list(dataset.keys())[0]
-            examples = dataset[split].select(
-                range(min(args.max_samples_per_client, len(dataset[split])))
+            example_indices = client_partition_indices(
+                len(dataset[split]),
+                client,
+                clients,
+                int(config.get("seed", 42)),
+                args.max_samples_per_client,
+                data_partition_mode,
             )
+            examples = dataset[split].select(example_indices)
 
             for idx, example in enumerate(examples):
                 task_prompt, ground_truth = make_prompt(client, example)
@@ -238,8 +262,10 @@ def main() -> None:
                     "mas": client["mas"],
                     "dataset": client["dataset"],
                     "dataset_name": client["dataset_name"],
+                    **client_partition_metadata(client, clients, data_partition_mode),
                     "split": split,
                     "example_index": idx,
+                    "source_example_index": example_indices[idx],
                     "model_path": args.model_path,
                     "orchestrator_mode": args.orchestrator_mode,
                     "orchestrator_metadata": orchestrated.metadata,

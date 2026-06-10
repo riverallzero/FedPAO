@@ -21,7 +21,7 @@ Its purpose is to help heterogeneous multi-agent systems orchestrate better by l
 
 The default configuration is `configs/fedpao_six_clients.yaml`. It connects MASRouter and GPT-Swarm clients to MMLU-Pro and GSM-Hard datasets.
 
-By default, each client samples 100 examples, uses an 80/20 train-validation split for round-level validation, and reserves 3 additional held-out examples for summary trajectory analysis.
+By default, each client samples 100 examples, uses an 80/20 train-validation split for round-level validation, and reserves 3 additional held-out examples for summary trajectory analysis. The default `data.partition_mode: client_disjoint` gives clients that use the same dataset non-overlapping shuffled subsets, so MMLU-Pro clients do not all train and evaluate on the same 100 rows. Set `data.partition_mode: shared` or pass `--data-partition-mode shared` to reproduce the older shared-data behavior.
 
 ## Project Layout
 
@@ -162,6 +162,22 @@ CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run.py \
 
 With `--start-round N`, the runner loads the manifest from `round_(N-1)` and continues from there.
 
+### Run held-out test inference
+
+Use `scripts/run_test.py` to evaluate a completed run on held-out test examples.
+
+```bash
+python3 scripts/run_test.py --run-root outputs/runs/<run-name> --rounds 0 1 2 3
+```
+
+To override the number of held-out test examples per client:
+
+```bash
+python3 scripts/run_test.py \
+  --run-root outputs/runs/<run-name> \
+  --test-samples-per-client 20
+```
+
 ### Run standalone baseline inference
 
 Use `scripts/run_client_inference.py` when you only want to test an individual MAS wrapper instead of the full round runner.
@@ -188,6 +204,7 @@ CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/run_client_inference.py --mas gp
 --max-train-samples-per-client   Round 0 train sample limit
 --max-valid-samples-per-client   Round validation sample limit
 --max-samples-per-client         Override held-out summary trajectory sample limit
+--data-partition-mode            shared or client_disjoint
 --dtype                          auto, float16, bfloat16, float32
 ```
 
@@ -202,3 +219,22 @@ See the full CLI help with:
 - `docs/environment_setup.md`: Environment and dependency setup notes
 - `docs/orchestrator_setup.md`: MASRouter and GPT-Swarm adapter notes
 - `docs/run_round_training_flow.md`: Round-by-round execution flow for `scripts/run.py`
+
+## Results
+Experimental setting:
+
+- LLM: local `Qwen3-4B-Instruct` at `/data/digirl/checkpoints/Qwen3-4B-Instruct/`
+- Clients: MASRouter and GPT-Swarm on MMLU-Pro and GSM-Hard (`c1`-`c4`)
+- Data: `client_disjoint` partitioning; each client uses 100 examples split into 80 train / 20 validation examples, plus 3 held-out trajectory examples for summary analysis.
+- Test: 20 held-out test examples per client, excluding train/validation/trajectory examples.
+- Training schedule: round 0 is the MAS baseline checkpoint; rounds 1-4 perform federated prompt learning with client prompt refinement and FedAvg global prompt aggregation.
+
+After 4 federated learning rounds, total test accuracy improves from `0.2250` at round 0 to `0.2875` at round 4, a relative gain of **27.78%** (`+6.25` percentage points).
+
+| Round | C1 (MASRouter-MMLU) | C2 (MASRouter-GSM) | C3 (GPTSwarm-MMLU) | C4 (GPTSwarm-GSM) | Total |
+|:-----:|:-------------------:|:------------------:|:------------------:|:-----------------:|:----:|
+| 0 | 0.4500 | 0.1500 | 0.2000 | 0.1000 | 0.2250 |
+| 1 | **0.5000** | 0.2500 | **0.2500** | **0.1500** | **0.2875** |
+| 2 | **0.5000** | 0.2500 | 0.1500 | 0.1000 | 0.2500 |
+| 3 | 0.4500 | 0.2500 | 0.1500 | 0.0000 | 0.2125 |
+| 4 | 0.4000 | **0.5000** | 0.1500 | 0.1000 | **0.2875** |

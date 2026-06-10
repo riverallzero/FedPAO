@@ -36,6 +36,11 @@ from scripts.run_client_inference import (  # noqa: E402
     make_prompt,
     normalize_prediction,
 )
+from scripts.data_partitioning import (  # noqa: E402
+    client_partition_indices,
+    client_partition_metadata,
+    partition_mode,
+)
 from src.orchestrators import create_orchestrator  # noqa: E402
 from src.orchestrators.native_baselines import (  # noqa: E402
     bootstrap_masrouter_imports,
@@ -135,19 +140,23 @@ def full_benchmark_dataset(client: dict[str, Any]):
 
 def split_client_examples(
     client: dict[str, Any],
+    clients: list[dict[str, Any]],
     train_fraction: float,
     seed: int,
     sample_limit: int | None = None,
     train_limit: int | None = None,
     valid_limit: int | None = None,
+    mode: str = "shared",
 ) -> tuple[str, list[dict[str, Any]], str, list[dict[str, Any]]]:
     dataset = full_benchmark_dataset(client)
-    indices = list(range(len(dataset)))
-    split_key = client.get("dataset_name") or client.get("dataset") or client["id"]
-    split_seed = seed + sum(ord(char) for char in split_key)
-    random.Random(split_seed).shuffle(indices)
-    if sample_limit is not None:
-        indices = indices[:sample_limit]
+    indices = client_partition_indices(
+        len(dataset),
+        client,
+        clients,
+        seed,
+        sample_limit,
+        mode,
+    )
     train_size = int(len(indices) * train_fraction)
     train_size = min(max(train_size, 1), max(len(indices) - 1, 1)) if len(indices) > 1 else len(indices)
     train_indices = indices[:train_size]
@@ -166,12 +175,14 @@ def split_client_examples(
 
 def split_client_examples_with_trajectory(
     client: dict[str, Any],
+    clients: list[dict[str, Any]],
     train_fraction: float,
     seed: int,
     sample_limit: int | None = None,
     train_limit: int | None = None,
     valid_limit: int | None = None,
     trajectory_limit: int | None = None,
+    mode: str = "shared",
 ) -> tuple[
     str,
     list[dict[str, Any]],
@@ -181,10 +192,17 @@ def split_client_examples_with_trajectory(
     list[dict[str, Any]],
 ]:
     dataset = full_benchmark_dataset(client)
-    indices = list(range(len(dataset)))
-    split_key = client.get("dataset_name") or client.get("dataset") or client["id"]
-    split_seed = seed + sum(ord(char) for char in split_key)
-    random.Random(split_seed).shuffle(indices)
+    partition_limit = sample_limit
+    if sample_limit is not None and trajectory_limit is not None:
+        partition_limit = sample_limit + trajectory_limit
+    indices = client_partition_indices(
+        len(dataset),
+        client,
+        clients,
+        seed,
+        partition_limit,
+        mode,
+    )
 
     train_valid_indices = indices[:sample_limit] if sample_limit is not None else indices
     trajectory_indices = indices[sample_limit:] if sample_limit is not None else []
@@ -821,16 +839,19 @@ def round0_train(
     train_fraction = float(data_cfg.get("train_fraction", 0.8))
     sample_limit = data_cfg.get("max_samples_per_client")
     sample_limit = int(sample_limit) if sample_limit is not None else None
+    data_partition_mode = partition_mode(data_cfg)
     valid_limit = args.max_valid_samples_per_client
 
     for client in clients:
         split, examples, valid_split, valid_examples = split_client_examples(
             client,
+            clients,
             train_fraction,
             int(config.get("seed", 42)),
             sample_limit=sample_limit,
             train_limit=max_train_samples,
             valid_limit=valid_limit,
+            mode=data_partition_mode,
         )
         num_examples = len(examples)
         client_name = slugify(f"{client['id']}_{client['mas']}_{client['dataset']}")
@@ -891,6 +912,7 @@ def round0_train(
             "mas": client["mas"],
             "dataset": client["dataset"],
             "dataset_name": client["dataset_name"],
+            **client_partition_metadata(client, clients, data_partition_mode),
             "split": split,
             "valid_split": valid_split,
             "num_examples": num_examples,
@@ -1115,21 +1137,101 @@ def project_report_embedding_to_latent(
     return latent.detach().cpu()
 
 
-def score_prompt_candidate(
+def prompt_candidate_state(
     candidate: torch.Tensor,
-    report_latent: torch.Tensor,
+    *,
+    prompt_cfg: dict[str, Any],
+    projection_seed: int,
     report: dict[str, Any],
-    objective_cfg: dict[str, Any],
-) -> float:
-    alignment = F.cosine_similarity(candidate, report_latent, dim=0).item()
-    accuracy = float(report.get("accuracy") or 0.0)
-    latent_norm_weight = float(objective_cfg.get("latent_norm_weight", 0.0))
-    norm_penalty = candidate.norm().item()
-    return (
-        alignment
-        + accuracy
-        - latent_norm_weight * norm_penalty
+) -> dict[str, Any]:
+    return {
+        "soft_prompt": candidate.detach().cpu(),
+        "num_virtual_tokens": int(
+            prompt_cfg.get("num_virtual_tokens", prompt_cfg.get("soft_prompt_tokens", 8))
+        ),
+        "projection_seed": projection_seed,
+        "bridge_text": prompt_bridge_text(report),
+        "source_report": report.get("report_path"),
+    }
+
+
+def evaluate_prompt_candidate_on_validation(
+    *,
+    candidate: torch.Tensor,
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    client: dict[str, Any],
+    valid_examples: list[dict[str, Any]],
+    backend: dict[str, Any],
+    orchestrator,
+    report: dict[str, Any],
+    projection_seed: int,
+) -> tuple[float, dict[str, Any]]:
+    objective_cfg = config.get("objective", {})
+    prompt_cfg = config.get("prompt", {})
+    prompt_state = prompt_candidate_state(
+        candidate,
+        prompt_cfg=prompt_cfg,
+        projection_seed=projection_seed,
+        report=report,
     )
+    llm_generate = lambda prompt: generate_with_embedding_soft_prompt(
+        backend,
+        prompt,
+        args.max_new_tokens,
+        prompt_state,
+        config,
+    )
+    correct = 0
+    costs = []
+    latencies = []
+    errors = 0
+    for example in valid_examples:
+        task_prompt, ground_truth = make_prompt(client, example)
+        start = time.perf_counter()
+        stdout_buffer = io.StringIO()
+        stderr_buffer = io.StringIO()
+        try:
+            with (
+                contextlib.redirect_stdout(stdout_buffer),
+                contextlib.redirect_stderr(stderr_buffer),
+            ):
+                orchestrated = orchestrator.run_inference(
+                    client,
+                    dict(example),
+                    task_prompt,
+                    llm_generate,
+                )
+            response = orchestrated.metadata.get("response", "")
+            prediction = normalize_prediction(client["dataset"], response)
+            correct += int(is_correct(client["dataset"], prediction, ground_truth))
+            if orchestrated.metadata.get("cost") is not None:
+                costs.append(float(orchestrated.metadata["cost"]))
+        except Exception:
+            errors += 1
+        latencies.append(time.perf_counter() - start)
+
+    num_examples = len(valid_examples)
+    accuracy = correct / num_examples if num_examples else 0.0
+    avg_cost = sum(costs) / len(costs) if costs else 0.0
+    avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
+    norm_penalty = candidate.norm().item()
+    score = (
+        accuracy
+        - float(objective_cfg.get("cost_weight", 0.0)) * avg_cost
+        - float(objective_cfg.get("latency_weight", 0.0)) * avg_latency
+        - float(objective_cfg.get("latent_norm_weight", 0.0)) * norm_penalty
+    )
+    return score, {
+        "score": score,
+        "accuracy": accuracy,
+        "correct": correct,
+        "num_examples": num_examples,
+        "avg_cost": avg_cost,
+        "avg_latency_sec": avg_latency,
+        "latent_norm": norm_penalty,
+        "errors": errors,
+    }
 
 
 def gradient_free_refine_prompt_latent(
@@ -1137,6 +1239,11 @@ def gradient_free_refine_prompt_latent(
     report: dict[str, Any],
     config: dict[str, Any],
     client: dict[str, Any],
+    args: argparse.Namespace,
+    valid_examples: list[dict[str, Any]],
+    backend: dict[str, Any],
+    orchestrator,
+    projection_seed: int,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     optimizer_cfg = config.get("optimizer", {})
     prompt_cfg = config.get("prompt", {})
@@ -1146,8 +1253,20 @@ def gradient_free_refine_prompt_latent(
     init_std = float(prompt_cfg.get("init_std", 0.02))
     seed = int(config.get("seed", 42)) + sum(ord(char) for char in client["id"]) + 1009
     generator = torch.Generator().manual_seed(seed)
-    objective_cfg = config.get("objective", {})
     optimizer_name = str(optimizer_cfg.get("name", "gradient_free_random_search")).lower()
+
+    def evaluate(candidate: torch.Tensor) -> tuple[float, dict[str, Any]]:
+        return evaluate_prompt_candidate_on_validation(
+            candidate=candidate,
+            args=args,
+            config=config,
+            client=client,
+            valid_examples=valid_examples,
+            backend=backend,
+            orchestrator=orchestrator,
+            report=report,
+            projection_seed=projection_seed,
+        )
 
     if optimizer_name in {"cma_es", "cma-es", "cma"}:
         try:
@@ -1170,33 +1289,40 @@ def gradient_free_refine_prompt_latent(
             },
         )
         best_latent = base_latent.clone().float()
-        best_score = score_prompt_candidate(
-            best_latent,
-            base_latent,
-            report,
-            objective_cfg,
-        )
-        history = [{"iteration": 0, "best_score": best_score}]
+        best_score, best_metrics = evaluate(best_latent)
+        history = [
+            {
+                "iteration": 0,
+                "best_score": best_score,
+                "best_metrics": best_metrics,
+            }
+        ]
 
         for iteration in range(1, iterations + 1):
             candidates = es.ask()
             losses = []
+            iteration_best = None
             for candidate_np in candidates:
                 candidate = torch.from_numpy(
                     np.asarray(candidate_np, dtype=np.float32)
                 )
-                score = score_prompt_candidate(
-                    candidate,
-                    base_latent,
-                    report,
-                    objective_cfg,
-                )
+                score, metrics = evaluate(candidate)
                 losses.append(-score)
+                if iteration_best is None or score > iteration_best["score"]:
+                    iteration_best = metrics
                 if score > best_score:
                     best_score = score
                     best_latent = candidate.detach().cpu()
+                    best_metrics = metrics
             es.tell(candidates, losses)
-            history.append({"iteration": iteration, "best_score": best_score})
+            history.append(
+                {
+                    "iteration": iteration,
+                    "best_score": best_score,
+                    "best_metrics": best_metrics,
+                    "iteration_best_metrics": iteration_best,
+                }
+            )
 
         return best_latent, {
             "optimizer": "cma_es",
@@ -1204,28 +1330,52 @@ def gradient_free_refine_prompt_latent(
             "population_size": population_size,
             "sigma0": sigma0,
             "seed": seed,
-            "objective": "maximize cosine(report_latent, candidate) + accuracy - latent norm penalty",
+            "objective": (
+                "maximize client validation reward: accuracy"
+                " - cost_weight*avg_cost"
+                " - latency_weight*avg_latency"
+                " - latent_norm_weight*||candidate||"
+            ),
             "best_score": best_score,
+            "best_metrics": best_metrics,
+            "num_validation_examples": len(valid_examples),
             "history": history,
         }
 
     best_latent = base_latent.clone().float()
-    best_score = score_prompt_candidate(best_latent, base_latent, report, objective_cfg)
-    history = [{"iteration": 0, "best_score": best_score}]
+    best_score, best_metrics = evaluate(best_latent)
+    history = [
+        {
+            "iteration": 0,
+            "best_score": best_score,
+            "best_metrics": best_metrics,
+        }
+    ]
     noise_scale = sigma0 * init_std
 
     for iteration in range(1, iterations + 1):
+        iteration_best = None
         for _ in range(population_size):
             candidate = base_latent + torch.randn(
                 base_latent.shape,
                 generator=generator,
                 dtype=torch.float32,
             ) * noise_scale
-            score = score_prompt_candidate(candidate, base_latent, report, objective_cfg)
+            score, metrics = evaluate(candidate)
+            if iteration_best is None or score > iteration_best["score"]:
+                iteration_best = metrics
             if score > best_score:
                 best_score = score
                 best_latent = candidate.detach().cpu()
-        history.append({"iteration": iteration, "best_score": best_score})
+                best_metrics = metrics
+        history.append(
+            {
+                "iteration": iteration,
+                "best_score": best_score,
+                "best_metrics": best_metrics,
+                "iteration_best_metrics": iteration_best,
+            }
+        )
 
     return best_latent, {
         "optimizer": optimizer_name,
@@ -1233,8 +1383,15 @@ def gradient_free_refine_prompt_latent(
         "population_size": population_size,
         "sigma0": sigma0,
         "seed": seed,
-        "objective": "cosine(report_latent, candidate) + accuracy - latent norm penalty",
+        "objective": (
+            "maximize client validation reward: accuracy"
+            " - cost_weight*avg_cost"
+            " - latency_weight*avg_latency"
+            " - latent_norm_weight*||candidate||"
+        ),
         "best_score": best_score,
+        "best_metrics": best_metrics,
+        "num_validation_examples": len(valid_examples),
         "history": history,
     }
 
@@ -1392,6 +1549,9 @@ def write_client_prompt_artifact(
     report: dict[str, Any],
     backend: dict[str, Any],
     config: dict[str, Any],
+    args: argparse.Namespace,
+    valid_examples: list[dict[str, Any]],
+    orchestrator,
     round_index: int = 1,
 ) -> dict[str, Any]:
     prompt_cfg = config.get("prompt", {})
@@ -1411,6 +1571,11 @@ def write_client_prompt_artifact(
         report,
         config,
         client,
+        args,
+        valid_examples,
+        backend,
+        orchestrator,
+        projection_seed,
     )
 
     artifact_path = client_dir / f"prompt_round{round_index}.pt"
@@ -1596,6 +1761,8 @@ def write_client_analysis_report(
 def resolve_runtime_args(args: argparse.Namespace, config: dict[str, Any]) -> None:
     if args.model_path is None:
         args.model_path = config.get("model", {}).get("model_id", DEFAULT_MODEL_PATH)
+    if args.data_partition_mode is not None:
+        config.setdefault("data", {})["partition_mode"] = args.data_partition_mode
 
 
 def resolve_run_root(args: argparse.Namespace) -> tuple[str, Path]:
@@ -1818,6 +1985,7 @@ def run_federated_round(
             train_fraction = float(data_cfg.get("train_fraction", 0.8))
             sample_limit = data_cfg.get("max_samples_per_client")
             sample_limit = int(sample_limit) if sample_limit is not None else None
+            data_partition_mode = partition_mode(data_cfg)
             trajectory_limit = (
                 args.max_samples_per_client
                 if args.max_samples_per_client is not None
@@ -1835,12 +2003,14 @@ def run_federated_round(
                 trajectory_examples,
             ) = split_client_examples_with_trajectory(
                 client,
+                clients,
                 train_fraction,
                 int(config.get("seed", 42)),
                 sample_limit=sample_limit,
                 train_limit=args.max_train_samples_per_client,
                 valid_limit=args.max_valid_samples_per_client,
                 trajectory_limit=trajectory_limit,
+                mode=data_partition_mode,
             )
             if not valid_examples:
                 raise RuntimeError(
@@ -1905,6 +2075,9 @@ def run_federated_round(
                 report,
                 backend,
                 config,
+                args,
+                valid_examples,
+                orchestrator,
                 round_index=round_index,
             )
             prompt_state = load_global_prompt_state(prompt_manifest["prompt_artifact_path"])
@@ -1923,6 +2096,7 @@ def run_federated_round(
             trained_record.update(
                 {
                     "valid_split": valid_split,
+                    **client_partition_metadata(client, clients, data_partition_mode),
                     "num_valid_examples": len(valid_examples),
                     "trajectory_split": trajectory_split,
                     "num_trajectory_examples": len(trajectory_examples),
@@ -2089,6 +2263,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Override data.max_trajectory_samples_per_client for held-out "
             "summary trajectories in post-training rounds."
+        ),
+    )
+    parser.add_argument(
+        "--data-partition-mode",
+        choices=["shared", "client_disjoint"],
+        default=None,
+        help=(
+            "Override data.partition_mode. shared keeps the old behavior; "
+            "client_disjoint gives clients with the same dataset non-overlapping subsets."
         ),
     )
     parser.add_argument("--max-new-tokens", type=int, default=64)

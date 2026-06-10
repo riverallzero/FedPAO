@@ -2,7 +2,7 @@ seed: 42
 
 model:
   backend: hf_local
-  model_id: /data/Llama-3.1-8B-Instruct # /data/digirl/checkpoints/Qwen3-4B-Instruct/
+  model_id: /data/digirl/checkpoints/Qwen3-4B-Instruct/ # /data/Llama-3.1-8B-Instruct
   device: cuda
   dtype: auto
 
@@ -12,6 +12,7 @@ prompt:
   init_std: 0.02
 
 data:
+  partition_mode: client_disjoint # shared
   train_fraction: 0.8
   max_samples_per_client: 100
   max_trajectory_samples_per_client: 3
@@ -19,7 +20,7 @@ data:
 optimizer:
   name: cma_es
   sigma0: 0.5
-  population_size: 12
+  population_size: 5
   local_iterations: 10
   local_batch_size: 16
 
@@ -28,6 +29,8 @@ federated:
   weight_by: num_examples
 
 objective:
+  cost_weight: 0.0
+  latency_weight: 0.0
   latent_norm_weight: 0.05
 
 evaluation:
